@@ -316,35 +316,100 @@ const signDeclaration = async (conn, onLog) => {
   }
   onLog("debug", "✓ Signature confirmed");
 
-  onLog("debug", "Waiting for signing process to complete...");
+  onLog(
+    "debug",
+    "Waiting for signing process to complete (may take 5-30 seconds)...",
+  );
   await waitForBusyOverlay(page);
-  await page.waitForTimeout(1800);
-  onLog("debug", "✓ Declaration signed successfully");
+
+  // Wait for IMPRIMER button to appear and be ready
+  onLog("debug", "Waiting for IMPRIMER button to become available...");
+  const imprimerVisible = await firstVisible(
+    page,
+    [
+      "#secure_imprimer",
+      "a.ui-menuitem-link:has-text('IMPRIMER')",
+      "span.ui-menuitem-text:has-text('IMPRIMER')",
+    ],
+    8000,
+  ); // Wait up to 8 seconds for IMPRIMER button
+
+  if (imprimerVisible) {
+    onLog(
+      "debug",
+      "✓ IMPRIMER button detected - declaration signed successfully",
+    );
+  } else {
+    onLog(
+      "warn",
+      "⚠ IMPRIMER button not detected within 8 seconds, but continuing...",
+    );
+  }
+
+  // Extra wait to ensure page is fully stable
+  await page.waitForTimeout(2000);
+  onLog("debug", "✓ Page stabilized");
 };
 
 const printAndSave = async (conn, targetPath, onLog) => {
   const page = conn.page;
   await fs.ensureDir(path.dirname(targetPath));
 
-  onLog("debug", "Clicking IMPRIMER to download PDF...");
+  // Start waiting for the download before clicking IMPRIMER to avoid missing the event.
   const downloadPromise = page.waitForEvent("download", {
     timeout: config.timeout,
   });
 
-  const clicked = await clickFirst(page, [
-    "#secure_imprimer",
-    "a.ui-menuitem-link:has-text('IMPRIMER')",
-    "span.ui-menuitem-text:has-text('IMPRIMER')",
-  ]);
+  onLog("debug", "Waiting for IMPRIMER button to be clickable...");
 
-  if (!clicked) {
-    throw new Error("Could not click IMPRIMER");
+  // Extra wait to ensure button is fully rendered and responsive
+  await page.waitForTimeout(1500);
+
+  // Try to find and click IMPRIMER button with multiple attempts
+  let imprimerClicked = false;
+  let retries = 0;
+  const maxRetries = 3;
+
+  while (!imprimerClicked && retries < maxRetries) {
+    try {
+      onLog(
+        "debug",
+        `Attempting to click IMPRIMER (attempt ${retries + 1}/${maxRetries})...`,
+      );
+
+      imprimerClicked = await clickFirst(page, [
+        "#secure_imprimer",
+        "a.ui-menuitem-link:has-text('IMPRIMER')",
+        "span.ui-menuitem-text:has-text('IMPRIMER')",
+      ]);
+
+      if (imprimerClicked) {
+        onLog("debug", "✓ IMPRIMER clicked");
+        break;
+      }
+
+      retries++;
+      if (retries < maxRetries) {
+        onLog("debug", `IMPRIMER not found, waiting 1s before retry...`);
+        await page.waitForTimeout(1000);
+      }
+    } catch (e) {
+      retries++;
+      await page.waitForTimeout(1000);
+    }
   }
-  onLog("debug", "✓ IMPRIMER clicked - waiting for download...");
 
+  if (!imprimerClicked) {
+    throw new Error("Could not click IMPRIMER button after 3 attempts");
+  }
+
+  onLog("debug", "Waiting for PDF download...");
   const download = await downloadPromise;
   await download.saveAs(targetPath);
-  onLog("debug", "✓ PDF saved to: " + path.basename(targetPath));
+  onLog("info", "✓ PDF SAVED", {
+    filename: path.basename(targetPath),
+    fullPath: targetPath,
+  });
 };
 
 export const runSigningJob = async ({
@@ -359,7 +424,7 @@ export const runSigningJob = async ({
 
   for (const lta of parsedLtas) {
     const ltaFolder = path.join(
-      config.directories.outputs,
+      config.directories.signedLtas,
       `LTA N° ${lta.ltaRef}`,
     );
     await fs.ensureDir(ltaFolder);
@@ -370,6 +435,9 @@ export const runSigningJob = async ({
     });
 
     for (const dum of lta.dums) {
+      const pdfName = `DUM ${dum.dumNumber} LTA N°${lta.ltaRef}.pdf`;
+      const pdfPath = path.join(ltaFolder, pdfName);
+
       const result = {
         ltaRef: lta.ltaRef,
         fileName: lta.fileName,
@@ -377,8 +445,21 @@ export const runSigningJob = async ({
         rawSerie: dum.rawSerie,
         status: "failed",
         reason: "",
-        outputPdf: "",
+        outputPdf: pdfPath,
       };
+
+      // Resume mode: skip DUMs that are already signed on disk.
+      if (await fs.pathExists(pdfPath)) {
+        result.status = "skipped";
+        result.reason = "Already signed (existing PDF found)";
+        onLog(
+          "info",
+          `↷ SKIPPED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef} already signed`,
+          { outputPdf: pdfPath },
+        );
+        results.push(result);
+        continue;
+      }
 
       try {
         onLog("info", `Processing DUM ${dum.dumNumber} for LTA ${lta.ltaRef}`);
@@ -417,13 +498,11 @@ export const runSigningJob = async ({
         await clickSecondValidate(conn, onLog);
         await signDeclaration(conn, onLog);
 
-        const pdfName = `DUM ${dum.dumNumber} LTA N°${lta.ltaRef}.pdf`;
-        const pdfPath = path.join(ltaFolder, pdfName);
         await printAndSave(conn, pdfPath, onLog);
 
         result.status = "success";
         result.outputPdf = pdfPath;
-        onLog("info", `✓ SUCCESS - DUM ${dum.dumNumber} signed and saved`, {
+        onLog("info", `✓ SUCCESS - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}`, {
           outputPdf: pdfPath,
         });
       } catch (error) {

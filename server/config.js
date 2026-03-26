@@ -32,6 +32,10 @@ export const config = {
     dums: process.env.DUMS_DIR || path.join(userDataDir, "dums"),
     outputs: process.env.OUTPUTS_DIR || path.join(userDataDir, "outputs"),
     logs: process.env.LOGS_DIR || path.join(userDataDir, "logs"),
+    signedLtas:
+      process.env.SIGNED_LTAS_DIR ||
+      process.env.OUTPUTS_DIR ||
+      path.join(userDataDir, "outputs"),
   },
   badr: {
     url: process.env.BADR_URL || "https://badr.douane.gov.ma:40444/badr/Login",

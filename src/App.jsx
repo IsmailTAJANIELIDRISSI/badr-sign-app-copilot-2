@@ -30,6 +30,13 @@ function App() {
         setApiReady(true);
       }
 
+      // Load saved shipper names
+      const shippersRes = await fetch("/api/shippers");
+      if (shippersRes.ok) {
+        const shippersData = await shippersRes.json();
+        setShippers(shippersData);
+      }
+
       const r = await fetch("/api/lta-files");
       const data = await r.json();
       setLtaFiles(data);
@@ -66,6 +73,27 @@ function App() {
 
     return () => clearInterval(timer);
   }, [jobId]);
+
+  const updateShipper = async (fileName, shipperName) => {
+    // Update local state immediately for responsiveness
+    setShippers((prev) => ({
+      ...prev,
+      [fileName]: shipperName,
+    }));
+
+    // Save to backend
+    if (shipperName.trim()) {
+      try {
+        await fetch("/api/shippers", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fileName, shipperName }),
+        });
+      } catch (error) {
+        console.error("Failed to save shipper:", error);
+      }
+    }
+  };
 
   const run = async () => {
     const payload = {
@@ -170,12 +198,7 @@ function App() {
               </label>
               <input
                 value={shippers[item.fileName] || ""}
-                onChange={(e) =>
-                  setShippers((prev) => ({
-                    ...prev,
-                    [item.fileName]: e.target.value,
-                  }))
-                }
+                onChange={(e) => updateShipper(item.fileName, e.target.value)}
                 placeholder="Type exact shipper name"
                 className="mt-1 w-full rounded-xl border border-ink/15 bg-white/95 px-3 py-2 text-sm outline-none transition focus:border-ink"
               />
@@ -213,6 +236,9 @@ function App() {
               </span>
               <span className="rounded-full bg-mint/20 px-3 py-1">
                 Success: {job.progress.success}
+              </span>
+              <span className="rounded-full bg-steel/30 px-3 py-1">
+                Skipped: {job.progress.skipped ?? 0}
               </span>
               <span className="rounded-full bg-coral/30 px-3 py-1">
                 Failed: {job.progress.failed}

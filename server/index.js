@@ -12,6 +12,7 @@ import { runSigningJob } from "./automation.js";
 await fs.ensureDir(config.directories.dums);
 await fs.ensureDir(config.directories.outputs);
 await fs.ensureDir(config.directories.logs);
+await fs.ensureDir(config.directories.signedLtas);
 
 const app = express();
 app.use(cors());
@@ -104,9 +105,10 @@ app.post("/api/jobs/run", async (req, res) => {
       job.progress.success = results.filter(
         (r) => r.status === "success",
       ).length;
-      job.progress.failed = results.filter(
-        (r) => r.status !== "success",
+      job.progress.skipped = results.filter(
+        (r) => r.status === "skipped",
       ).length;
+      job.progress.failed = results.filter((r) => r.status === "failed").length;
       job.status = "done";
       job.completedAt = new Date().toISOString();
     } catch (error) {
