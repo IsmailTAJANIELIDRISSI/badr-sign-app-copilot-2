@@ -44,9 +44,7 @@ function App() {
 
         for (const item of data) {
           const value =
-            byLtaRef[item.ltaRef] ||
-            byFileName[item.fileName] ||
-            "";
+            byLtaRef[item.ltaRef] || byFileName[item.fileName] || "";
           if (value) resolved[item.fileName] = value;
         }
 
