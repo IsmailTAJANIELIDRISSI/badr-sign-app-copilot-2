@@ -50,13 +50,62 @@ const textInTable = async (page, tableSelector) => {
   return toUpperCompact(await hit.loc.innerText());
 };
 
-const waitForBusyOverlay = async (page) => {
-  const loading = page.locator("div:has-text('Traitement en cours')").first();
-  if (await loading.isVisible().catch(() => false)) {
-    await loading
-      .waitFor({ state: "hidden", timeout: config.timeout })
-      .catch(() => {});
+const IMPRIMER_SELECTORS = [
+  "#secure_imprimer",
+  "a.ui-menuitem-link:has-text('IMPRIMER')",
+  "span.ui-menuitem-text:has-text('IMPRIMER')",
+];
+
+const LOADING_SELECTORS = [
+  "#j_id_9:has-text('Traitement en cours')",
+  "div.ui-blockui-content:has-text('Traitement en cours')",
+  "div:has-text('Traitement en cours')",
+];
+
+const waitForSigningReady = async (page, onLog) => {
+  // Don't let signing wait block for the full TIMEOUT (often 120s).
+  const maxWaitMs = Math.min(config.timeout, 45000);
+  const start = Date.now();
+  let sawLoading = false;
+
+  while (Date.now() - start < maxWaitMs) {
+    const imprimer = await firstVisible(page, IMPRIMER_SELECTORS, 150);
+    if (imprimer) {
+      const elapsed = Math.round((Date.now() - start) / 1000);
+      onLog("debug", `✓ IMPRIMER available after ${elapsed}s`);
+      return true;
+    }
+
+    const loading = await firstVisible(page, LOADING_SELECTORS, 150);
+    if (loading && !sawLoading) {
+      sawLoading = true;
+      onLog("debug", "Signing loader detected (Traitement en cours)...");
+    }
+
+    // If loader was seen and disappears, re-check quickly for IMPRIMER then continue.
+    if (!loading && sawLoading) {
+      for (let i = 0; i < 8; i++) {
+        const quickImprimer = await firstVisible(page, IMPRIMER_SELECTORS, 150);
+        if (quickImprimer) {
+          const elapsed = Math.round((Date.now() - start) / 1000);
+          onLog(
+            "debug",
+            `✓ Loader finished, IMPRIMER available after ${elapsed}s`,
+          );
+          return true;
+        }
+        await page.waitForTimeout(250);
+      }
+    }
+
+    await page.waitForTimeout(300);
   }
+
+  onLog(
+    "warn",
+    `⚠ Signing readiness wait exceeded ${Math.round(maxWaitMs / 1000)}s; continuing to IMPRIMER retries`,
+  );
+  return false;
 };
 
 const openModifyDeclaration = async (conn, onLog) => {
@@ -316,38 +365,11 @@ const signDeclaration = async (conn, onLog) => {
   }
   onLog("debug", "✓ Signature confirmed");
 
-  onLog(
-    "debug",
-    "Waiting for signing process to complete (may take 5-30 seconds)...",
-  );
-  await waitForBusyOverlay(page);
-
-  // Wait for IMPRIMER button to appear and be ready
-  onLog("debug", "Waiting for IMPRIMER button to become available...");
-  const imprimerVisible = await firstVisible(
-    page,
-    [
-      "#secure_imprimer",
-      "a.ui-menuitem-link:has-text('IMPRIMER')",
-      "span.ui-menuitem-text:has-text('IMPRIMER')",
-    ],
-    8000,
-  ); // Wait up to 8 seconds for IMPRIMER button
-
-  if (imprimerVisible) {
-    onLog(
-      "debug",
-      "✓ IMPRIMER button detected - declaration signed successfully",
-    );
-  } else {
-    onLog(
-      "warn",
-      "⚠ IMPRIMER button not detected within 8 seconds, but continuing...",
-    );
-  }
+  onLog("debug", "Waiting for signing process to complete...");
+  await waitForSigningReady(page, onLog);
 
   // Extra wait to ensure page is fully stable
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(600);
   onLog("debug", "✓ Page stabilized");
 };
 
@@ -377,11 +399,7 @@ const printAndSave = async (conn, targetPath, onLog) => {
         `Attempting to click IMPRIMER (attempt ${retries + 1}/${maxRetries})...`,
       );
 
-      imprimerClicked = await clickFirst(page, [
-        "#secure_imprimer",
-        "a.ui-menuitem-link:has-text('IMPRIMER')",
-        "span.ui-menuitem-text:has-text('IMPRIMER')",
-      ]);
+      imprimerClicked = await clickFirst(page, IMPRIMER_SELECTORS);
 
       if (imprimerClicked) {
         onLog("debug", "✓ IMPRIMER clicked");
