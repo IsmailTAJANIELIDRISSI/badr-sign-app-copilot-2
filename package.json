@@ -1,0 +1,48 @@
+{
+  "name": "badr-sign-app-2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n WEB,API -c cyan,green \"npm run dev:web\" \"npm run dev:server\"",
+    "dev:web": "vite",
+    "dev:server": "tsx watch server/index.js",
+    "dev:electron": "concurrently -n WEB,ELECTRON -c cyan,magenta \"npm run dev:web\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "vite build",
+    "build:electron": "npm run build && electron-builder",
+    "preview": "vite preview",
+    "start": "node server/index.js"
+  },
+  "main": "electron/main.js",
+  "dependencies": {
+    "chokidar": "^4.0.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "electron-is-dev": "^2.0.0",
+    "express": "^4.21.2",
+    "fs-extra": "^11.3.2",
+    "multer": "^2.0.2",
+    "pino": "^9.9.4",
+    "pino-pretty": "^13.1.2",
+    "playwright": "^1.55.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "uuid": "^11.1.0",
+    "xlsx": "^0.18.5",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.24",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.4.21",
+    "concurrently": "^9.2.1",
+    "electron": "^32.2.0",
+    "electron-builder": "^25.0.6",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "tsx": "^4.20.4",
+    "vite": "^5.4.20",
+    "wait-on": "^7.2.0"
+  }
+}
