@@ -9,11 +9,12 @@ const isDev = process.env.NODE_ENV !== "production";
 const isElectron = process.env.ELECTRON_APP === "true";
 
 // In dev mode, use workspace root; in production (packaged), use AppData
-const userDataDir = isDev && isElectron 
-  ? workspaceRoot 
-  : isElectron
-  ? path.join(os.homedir(), "AppData", "Local", "badr-sign-app")
-  : workspaceRoot;
+const userDataDir =
+  isDev && isElectron
+    ? workspaceRoot
+    : isElectron
+      ? path.join(os.homedir(), "AppData", "Local", "badr-sign-app")
+      : workspaceRoot;
 
 const toInt = (value, fallback) => {
   const parsed = Number.parseInt(String(value ?? ""), 10);

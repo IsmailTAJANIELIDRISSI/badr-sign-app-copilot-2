@@ -126,8 +126,12 @@ function App() {
         {dumsFolder && (
           <div className="mt-6 rounded-xl border border-coral/30 bg-coral/10 p-4">
             <p className="text-xs font-semibold text-coral">📂 DUMS FOLDER:</p>
-            <p className="mt-1 break-all font-mono text-sm text-steel">{dumsFolder}</p>
-            <p className="mt-2 text-xs text-steel">Place your Excel files here. Click "Refresh Files" to detect them.</p>
+            <p className="mt-1 break-all font-mono text-sm text-steel">
+              {dumsFolder}
+            </p>
+            <p className="mt-2 text-xs text-steel">
+              Place your Excel files here. Click "Refresh Files" to detect them.
+            </p>
           </div>
         )}
 
@@ -182,7 +186,8 @@ function App() {
         {apiReady && ltaFiles.length === 0 && !loading && (
           <div className="mt-6 rounded-xl border border-mint/30 bg-mint/10 p-6 text-center">
             <p className="text-sm text-steel">
-              📋 No Excel files detected. Place LTA Excel files in the dums folder above and click "Refresh Files".
+              📋 No Excel files detected. Place LTA Excel files in the dums
+              folder above and click "Refresh Files".
             </p>
           </div>
         )}
