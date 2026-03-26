@@ -98,6 +98,21 @@ app.post("/api/jobs/run", async (req, res) => {
           pushJobLog(jobId, level, message, meta);
           logger.info({ jobId, level, meta }, message);
         },
+        onShipperAutofix: async ({ fileName, ltaRef, shipperName }) => {
+          const shippers = await loadShippers();
+          const value = String(shipperName || "").trim();
+          if (!value) return;
+
+          if (fileName) shippers.byFileName[fileName] = value;
+          if (ltaRef) shippers.byLtaRef[ltaRef] = value;
+          await saveShippers(shippers);
+
+          pushJobLog(jobId, "info", "Expected shipper updated from BADR", {
+            fileName,
+            ltaRef,
+            shipperName: value,
+          });
+        },
       });
 
       job.results = results;
