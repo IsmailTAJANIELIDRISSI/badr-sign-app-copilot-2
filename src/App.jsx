@@ -30,16 +30,28 @@ function App() {
         setApiReady(true);
       }
 
-      // Load saved shipper names
-      const shippersRes = await fetch("/api/shippers");
-      if (shippersRes.ok) {
-        const shippersData = await shippersRes.json();
-        setShippers(shippersData);
-      }
-
       const r = await fetch("/api/lta-files");
       const data = await r.json();
       setLtaFiles(data);
+
+      // Load saved shipper names and resolve values for current files.
+      const shippersRes = await fetch("/api/shippers");
+      if (shippersRes.ok) {
+        const shippersData = await shippersRes.json();
+        const byFileName = shippersData.byFileName || shippersData || {};
+        const byLtaRef = shippersData.byLtaRef || {};
+        const resolved = {};
+
+        for (const item of data) {
+          const value =
+            byLtaRef[item.ltaRef] ||
+            byFileName[item.fileName] ||
+            "";
+          if (value) resolved[item.fileName] = value;
+        }
+
+        setShippers(resolved);
+      }
 
       setSelected((prev) => {
         const next = { ...prev };
@@ -74,24 +86,22 @@ function App() {
     return () => clearInterval(timer);
   }, [jobId]);
 
-  const updateShipper = async (fileName, shipperName) => {
+  const updateShipper = async (fileName, ltaRef, shipperName) => {
     // Update local state immediately for responsiveness
     setShippers((prev) => ({
       ...prev,
       [fileName]: shipperName,
     }));
 
-    // Save to backend
-    if (shipperName.trim()) {
-      try {
-        await fetch("/api/shippers", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fileName, shipperName }),
-        });
-      } catch (error) {
-        console.error("Failed to save shipper:", error);
-      }
+    // Save to backend (also persists clearing when empty)
+    try {
+      await fetch("/api/shippers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName, ltaRef, shipperName }),
+      });
+    } catch (error) {
+      console.error("Failed to save shipper:", error);
     }
   };
 
@@ -198,7 +208,9 @@ function App() {
               </label>
               <input
                 value={shippers[item.fileName] || ""}
-                onChange={(e) => updateShipper(item.fileName, e.target.value)}
+                onChange={(e) =>
+                  updateShipper(item.fileName, item.ltaRef, e.target.value)
+                }
                 placeholder="Type exact shipper name"
                 className="mt-1 w-full rounded-xl border border-ink/15 bg-white/95 px-3 py-2 text-sm outline-none transition focus:border-ink"
               />

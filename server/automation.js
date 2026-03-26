@@ -63,42 +63,56 @@ const LOADING_SELECTORS = [
 ];
 
 const waitForSigningReady = async (page, onLog) => {
-  // Don't let signing wait block for the full TIMEOUT (often 120s).
+  // Prefer loader lifecycle if present; otherwise fall back to IMPRIMER readiness polling.
   const maxWaitMs = Math.min(config.timeout, 45000);
   const start = Date.now();
+
   let sawLoading = false;
-
-  while (Date.now() - start < maxWaitMs) {
-    const imprimer = await firstVisible(page, IMPRIMER_SELECTORS, 150);
-    if (imprimer) {
-      const elapsed = Math.round((Date.now() - start) / 1000);
-      onLog("debug", `✓ IMPRIMER available after ${elapsed}s`);
-      return true;
-    }
-
-    const loading = await firstVisible(page, LOADING_SELECTORS, 150);
-    if (loading && !sawLoading) {
+  const detectWindowMs = 4000;
+  while (Date.now() - start < detectWindowMs) {
+    const loading = await firstVisible(page, LOADING_SELECTORS, 120);
+    if (loading) {
       sawLoading = true;
       onLog("debug", "Signing loader detected (Traitement en cours)...");
+      break;
+    }
+    await page.waitForTimeout(200);
+  }
+
+  if (sawLoading) {
+    // Wait until loader disappears first.
+    const loadingHit = await firstVisible(page, LOADING_SELECTORS, 120);
+    if (loadingHit) {
+      await loadingHit.loc
+        .waitFor({ state: "hidden", timeout: maxWaitMs })
+        .catch(() => {});
+      onLog("debug", "✓ Signing loader hidden");
+    }
+  }
+
+  // Require IMPRIMER to be stable for 2 checks to avoid stale/early visibility.
+  let stableVisibleCount = 0;
+  while (Date.now() - start < maxWaitMs) {
+    const loading = await firstVisible(page, LOADING_SELECTORS, 120);
+    if (loading) {
+      stableVisibleCount = 0;
+      await page.waitForTimeout(250);
+      continue;
     }
 
-    // If loader was seen and disappears, re-check quickly for IMPRIMER then continue.
-    if (!loading && sawLoading) {
-      for (let i = 0; i < 8; i++) {
-        const quickImprimer = await firstVisible(page, IMPRIMER_SELECTORS, 150);
-        if (quickImprimer) {
-          const elapsed = Math.round((Date.now() - start) / 1000);
-          onLog(
-            "debug",
-            `✓ Loader finished, IMPRIMER available after ${elapsed}s`,
-          );
-          return true;
-        }
-        await page.waitForTimeout(250);
+    const imprimer = await firstVisible(page, IMPRIMER_SELECTORS, 120);
+    if (imprimer) {
+      stableVisibleCount += 1;
+      if (stableVisibleCount >= 2) {
+        const elapsed = Math.round((Date.now() - start) / 1000);
+        onLog("debug", `✓ IMPRIMER ready after ${elapsed}s`);
+        return true;
       }
+    } else {
+      stableVisibleCount = 0;
     }
 
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(250);
   }
 
   onLog(
@@ -536,6 +550,15 @@ export const runSigningJob = async ({
 
       results.push(result);
     }
+
+    const ltaResults = results.filter((r) => r.ltaRef === lta.ltaRef);
+    const ltaSuccess = ltaResults.filter((r) => r.status === "success").length;
+    const ltaSkipped = ltaResults.filter((r) => r.status === "skipped").length;
+    const ltaFailed = ltaResults.filter((r) => r.status === "failed").length;
+    onLog(
+      "info",
+      `Completed LTA ${lta.ltaRef} (success=${ltaSuccess}, skipped=${ltaSkipped}, failed=${ltaFailed})`,
+    );
   }
 
   return results;

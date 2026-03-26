@@ -111,6 +111,12 @@ app.post("/api/jobs/run", async (req, res) => {
       job.progress.failed = results.filter((r) => r.status === "failed").length;
       job.status = "done";
       job.completedAt = new Date().toISOString();
+      pushJobLog(jobId, "info", "Job completed", {
+        total: job.progress.total,
+        success: job.progress.success,
+        skipped: job.progress.skipped,
+        failed: job.progress.failed,
+      });
     } catch (error) {
       pushJobLog(jobId, "error", "Job failed", { error: error.message });
       job.status = "failed";
@@ -144,12 +150,26 @@ const shippersFile = path.join(config.directories.outputs, ".shippers.json");
 const loadShippers = async () => {
   try {
     if (await fs.pathExists(shippersFile)) {
-      return await fs.readJson(shippersFile);
+      const raw = await fs.readJson(shippersFile);
+      // New format
+      if (raw && (raw.byFileName || raw.byLtaRef)) {
+        return {
+          byFileName: raw.byFileName || {},
+          byLtaRef: raw.byLtaRef || {},
+        };
+      }
+      // Legacy flat map format: { "file.xlsx": "SHIPPER" }
+      if (raw && typeof raw === "object") {
+        return {
+          byFileName: raw,
+          byLtaRef: {},
+        };
+      }
     }
   } catch (e) {
     logger.warn({ error: e.message }, "Could not load shippers.json");
   }
-  return {};
+  return { byFileName: {}, byLtaRef: {} };
 };
 
 const saveShippers = async (shippers) => {
@@ -167,18 +187,27 @@ app.get("/api/shippers", async (_req, res) => {
 });
 
 app.post("/api/shippers", express.json(), async (req, res) => {
-  const { fileName, shipperName } = req.body;
+  const { fileName, ltaRef, shipperName = "" } = req.body;
 
-  if (!fileName || !shipperName) {
-    return res.status(400).json({ error: "Missing fileName or shipperName" });
+  if (!fileName && !ltaRef) {
+    return res.status(400).json({ error: "Missing fileName and ltaRef" });
   }
 
   try {
     const shippers = await loadShippers();
-    shippers[fileName] = shipperName;
+    const value = String(shipperName).trim();
+
+    if (value) {
+      if (fileName) shippers.byFileName[fileName] = value;
+      if (ltaRef) shippers.byLtaRef[ltaRef] = value;
+    } else {
+      if (fileName) delete shippers.byFileName[fileName];
+      if (ltaRef) delete shippers.byLtaRef[ltaRef];
+    }
+
     await saveShippers(shippers);
-    logger.info({ fileName, shipperName }, "Saved shipper name");
-    res.json({ success: true, fileName, shipperName });
+    logger.info({ fileName, ltaRef, shipperName: value }, "Saved shipper name");
+    res.json({ success: true, fileName, ltaRef, shipperName: value });
   } catch (error) {
     logger.error({ error: error.message }, "Failed to save shipper");
     res.status(500).json({ error: error.message });
