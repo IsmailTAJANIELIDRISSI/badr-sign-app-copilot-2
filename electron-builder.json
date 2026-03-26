@@ -1,0 +1,43 @@
+{
+  "appId": "com.medafrica.badr-sign-app",
+  "productName": "BADR DUM Signing Automation",
+  "directories": {
+    "buildResources": "assets",
+    "output": "dist-electron"
+  },
+  "files": [
+    "dist/**/*",
+    "server/**/*",
+    "node_modules/**/*",
+    "electron/**/*",
+    ".env.production",
+    "package.json"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": ["x64"]
+      },
+      {
+        "target": "portable",
+        "arch": ["x64"]
+      }
+    ],
+    "certificateFile": null,
+    "certificatePassword": null,
+    "signingHashAlgorithms": ["sha256"],
+    "sign": null
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "BADR DUM Signing"
+  },
+  "portable": {
+    "artifactName": "BADR-DUM-Signing-${version}-portable.exe"
+  },
+  "publish": null
+}
