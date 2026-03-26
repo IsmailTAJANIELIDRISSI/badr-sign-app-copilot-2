@@ -254,14 +254,37 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
 
   if (ok) {
     onLog("debug", "✓ Shipper matches: " + actual);
-  } else {
-    onLog(
-      "error",
-      `✗ Shipper mismatch - expected: '${expectedShipper}' actual: '${actual}'`,
-    );
+    return { ok: true, actual, expected: expectedShipper, updated: false };
   }
 
-  return { ok, actual, expected: expectedShipper };
+  onLog(
+    "warn",
+    `✗ Shipper mismatch - expected: '${expectedShipper}' actual: '${actual}'. Updating BADR field...`,
+  );
+
+  await hit.loc.fill("");
+  await hit.loc.fill(expectedShipper);
+  await conn.page.waitForTimeout(300);
+
+  const after = await hit.loc.inputValue().catch(() => "");
+  const updatedOk = toUpperCompact(after) === toUpperCompact(expectedShipper);
+
+  if (updatedOk) {
+    onLog("info", "✓ BADR shipper field updated to expected value");
+    return {
+      ok: true,
+      actual,
+      expected: expectedShipper,
+      updated: true,
+      after,
+    };
+  }
+
+  onLog(
+    "error",
+    `✗ Could not update BADR shipper field. expected='${expectedShipper}' after='${after}'`,
+  );
+  return { ok: false, actual, expected: expectedShipper, updated: true, after };
 };
 
 const checkRequiredDocuments = async (conn, onLog) => {
@@ -448,7 +471,6 @@ export const runSigningJob = async ({
   parsedLtas,
   shipperByFileName,
   onLog,
-  onShipperAutofix,
 }) => {
   const conn = new BADRConnection();
   await conn.connect();
@@ -510,30 +532,9 @@ export const runSigningJob = async ({
           onLog,
         );
         if (!shipperCheck.ok) {
-          if (shipperCheck.actual) {
-            onLog(
-              "warn",
-              `Shipper mismatch detected. Updating expected shipper to '${shipperCheck.actual}' and continuing...`,
-            );
-
-            if (typeof onShipperAutofix === "function") {
-              await onShipperAutofix({
-                fileName: lta.fileName,
-                ltaRef: lta.ltaRef,
-                shipperName: shipperCheck.actual,
-              });
-            }
-
-            shipperByFileName[lta.fileName] = shipperCheck.actual;
-            onLog(
-              "info",
-              "✓ Expected shipper auto-corrected from BADR declaration",
-            );
-          } else {
-            throw new Error(
-              `Shipper mismatch. expected='${shipperCheck.expected}' actual='${shipperCheck.actual}'`,
-            );
-          }
+          throw new Error(
+            `Shipper mismatch. expected='${shipperCheck.expected}' actual='${shipperCheck.actual}'`,
+          );
         }
 
         const docsCheck = await checkRequiredDocuments(conn, onLog);
