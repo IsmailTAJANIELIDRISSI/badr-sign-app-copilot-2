@@ -136,6 +136,53 @@ app.get("/api/outputs", async (_req, res) => {
   res.json({ folders });
 });
 
+// Shipper name persistence
+const shippersFile = path.join(config.directories.outputs, ".shippers.json");
+
+const loadShippers = async () => {
+  try {
+    if (await fs.pathExists(shippersFile)) {
+      return await fs.readJson(shippersFile);
+    }
+  } catch (e) {
+    logger.warn({ error: e.message }, "Could not load shippers.json");
+  }
+  return {};
+};
+
+const saveShippers = async (shippers) => {
+  try {
+    await fs.ensureDir(path.dirname(shippersFile));
+    await fs.writeJson(shippersFile, shippers, { spaces: 2 });
+  } catch (e) {
+    logger.error({ error: e.message }, "Could not save shippers.json");
+  }
+};
+
+app.get("/api/shippers", async (_req, res) => {
+  const shippers = await loadShippers();
+  res.json(shippers);
+});
+
+app.post("/api/shippers", express.json(), async (req, res) => {
+  const { fileName, shipperName } = req.body;
+
+  if (!fileName || !shipperName) {
+    return res.status(400).json({ error: "Missing fileName or shipperName" });
+  }
+
+  try {
+    const shippers = await loadShippers();
+    shippers[fileName] = shipperName;
+    await saveShippers(shippers);
+    logger.info({ fileName, shipperName }, "Saved shipper name");
+    res.json({ success: true, fileName, shipperName });
+  } catch (error) {
+    logger.error({ error: error.message }, "Failed to save shipper");
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.listen(config.port, () => {
   logger.info(
     `API listening on http://localhost:${config.port} | Dums folder: ${config.directories.dums}`,
