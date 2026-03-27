@@ -10,6 +10,19 @@ const BADR_INTERNAL_ERROR_HINTS = [
   "COMMUNIQUER LA REFERENCE SUIVANTE A VOTRE SUPPORT",
 ];
 const BADR_INTERNAL_ERROR_PREFIX = "BADR_INTERNAL_ERROR";
+const SHIPPER_LEGAL_NOISE = new Set([
+  "CO",
+  "COMPANY",
+  "LTD",
+  "LIMITED",
+  "INC",
+  "LLC",
+  "SARL",
+  "SA",
+  "SAS",
+  "BV",
+  "PLC",
+]);
 
 const normalize = (value) => String(value ?? "").trim();
 
@@ -43,6 +56,34 @@ const extractLotRefs = (text) => {
 const isBadrInternalErrorText = (text) => {
   const normalized = toUpperCompact(text);
   return BADR_INTERNAL_ERROR_HINTS.some((hint) => normalized.includes(hint));
+};
+
+const normalizeShipperLoose = (value) =>
+  toUpperCompact(value)
+    .replace(/[^A-Z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const shipperBaseTokens = (value) =>
+  normalizeShipperLoose(value)
+    .split(" ")
+    .filter(Boolean)
+    .filter((token) => !SHIPPER_LEGAL_NOISE.has(token));
+
+const isShipperEquivalent = (expected, actual) => {
+  const eStrict = toUpperCompact(expected);
+  const aStrict = toUpperCompact(actual);
+  if (eStrict === aStrict) return true;
+
+  const eLoose = normalizeShipperLoose(expected);
+  const aLoose = normalizeShipperLoose(actual);
+  if (eLoose === aLoose) return true;
+
+  const eBase = shipperBaseTokens(expected).join(" ");
+  const aBase = shipperBaseTokens(actual).join(" ");
+  if (!eBase || !aBase) return false;
+
+  return eBase === aBase;
 };
 
 const contextsFor = (page) => [page, ...page.frames()];
@@ -443,10 +484,17 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
   const actual = await hit.loc.inputValue().catch(async () => {
     return hit.loc.evaluate((el) => el.value || el.getAttribute("value") || "");
   });
-  const ok = toUpperCompact(actual) === toUpperCompact(expectedShipper);
+  const ok = isShipperEquivalent(expectedShipper, actual);
 
   if (ok) {
-    onLog("debug", "✓ Shipper matches: " + actual);
+    const strictEqual =
+      toUpperCompact(actual) === toUpperCompact(expectedShipper);
+    onLog(
+      "debug",
+      strictEqual
+        ? "✓ Shipper matches: " + actual
+        : "✓ Shipper matches (tolerant compare): " + actual,
+    );
     await ensureNoBadrInternalError(conn, onLog, "check shipper done");
     return { ok: true, actual, expected: expectedShipper, updated: false };
   }
@@ -470,7 +518,7 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
   await conn.page.waitForTimeout(300);
 
   const after = await hit.loc.inputValue().catch(() => "");
-  const updatedOk = toUpperCompact(after) === toUpperCompact(expectedShipper);
+  const updatedOk = isShipperEquivalent(expectedShipper, after);
 
   if (updatedOk) {
     onLog("info", "✓ BADR shipper field updated to expected value");
