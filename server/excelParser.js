@@ -43,17 +43,22 @@ const extractDumsByFixedRows = (sheet) => {
   const dums = [];
   let dumNumber = 1;
   let row = 12;
+  let emptyStreak = 0;
 
   while (dumNumber <= 200) {
     const raw = getCell(sheet, "C", row).toUpperCase().replace(/\s+/g, "");
     if (!raw) {
-      if (dumNumber > 1) {
+      // Tolerate sparse/empty rows; stop only after many consecutive empties.
+      emptyStreak += 1;
+      if (emptyStreak >= 12) {
         break;
       }
       row += 7;
       dumNumber += 1;
       continue;
     }
+    emptyStreak = 0;
+
     const split = splitSeries(raw);
     if (!split) {
       row += 7;
@@ -78,7 +83,7 @@ const extractDumsByFixedRows = (sheet) => {
 
 const extractDumsByLabels = (sheet) => {
   const range = xlsx.utils.decode_range(sheet["!ref"] || "A1:H500");
-  const dums = [];
+  const byNumber = new Map();
 
   for (let r = range.s.r; r <= range.e.r; r += 1) {
     for (let c = range.s.c; c <= Math.min(range.e.c, 6); c += 1) {
@@ -94,20 +99,34 @@ const extractDumsByLabels = (sheet) => {
         .toUpperCase()
         .replace(/\s+/g, "");
       const split = splitSeries(maybeSeries);
-      if (!split) {
-        continue;
+
+      if (split) {
+        byNumber.set(dumNumber, {
+          dumNumber,
+          rawSerie: split.raw,
+          serie: split.serie,
+          key: split.key,
+          sourceCell: seriesAddr,
+          isValid: true,
+          invalidReason: "",
+        });
+      } else {
+        byNumber.set(dumNumber, {
+          dumNumber,
+          rawSerie: maybeSeries,
+          serie: "",
+          key: "",
+          sourceCell: seriesAddr,
+          isValid: false,
+          invalidReason: maybeSeries
+            ? `Invalid series format '${maybeSeries}'`
+            : "Missing DUM series",
+        });
       }
-      dums.push({
-        dumNumber,
-        rawSerie: split.raw,
-        serie: split.serie,
-        key: split.key,
-        sourceCell: seriesAddr,
-      });
     }
   }
 
-  return dums.sort((a, b) => a.dumNumber - b.dumNumber);
+  return [...byNumber.values()].sort((a, b) => a.dumNumber - b.dumNumber);
 };
 
 export const parseLtaExcel = (filePath) => {
@@ -119,7 +138,8 @@ export const parseLtaExcel = (filePath) => {
   const byFixedRows = extractDumsByFixedRows(sheet);
   const byLabels = extractDumsByLabels(sheet);
 
-  const dums = byFixedRows.length ? byFixedRows : byLabels;
+  // Prefer label-based extraction because it keeps DUM numbering even when some series are empty.
+  const dums = byLabels.length ? byLabels : byFixedRows;
 
   if (!ltaRef) {
     throw new Error(
@@ -133,11 +153,17 @@ export const parseLtaExcel = (filePath) => {
     );
   }
 
+  const validDums = dums.filter((d) => d.isValid !== false).length;
+  const invalidDums = dums.length - validDums;
+
   return {
     filePath,
     fileName: path.basename(filePath),
     ltaRef,
     ltaNumericRef: ltaRef.replace(/-/g, ""),
     dums,
+    totalDums: dums.length,
+    validDums,
+    invalidDums,
   };
 };

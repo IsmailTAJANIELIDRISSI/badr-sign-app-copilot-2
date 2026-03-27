@@ -62,6 +62,21 @@ const LOADING_SELECTORS = [
   "div:has-text('Traitement en cours')",
 ];
 
+const appendLtaLog = (logPath, level, message, meta = {}) => {
+  try {
+    const ts = new Date().toISOString();
+    const metaText = Object.keys(meta).length
+      ? ` | ${JSON.stringify(meta)}`
+      : "";
+    fs.appendFileSync(
+      logPath,
+      `[${ts}] ${String(level).toUpperCase()} - ${message}${metaText}\n`,
+    );
+  } catch {
+    // Non-blocking: file logging should never stop automation flow.
+  }
+};
+
 const waitForSigningReady = async (page, onLog) => {
   // Prefer loader lifecycle if present; otherwise fall back to IMPRIMER readiness polling.
   const maxWaitMs = Math.min(config.timeout, 45000);
@@ -478,15 +493,39 @@ export const runSigningJob = async ({
   const results = [];
 
   for (const lta of parsedLtas) {
-    const ltaFolder = path.join(
+    const normalLtaFolder = path.join(
       config.directories.signedLtas,
       `LTA N° ${lta.ltaRef}`,
     );
-    await fs.ensureDir(ltaFolder);
+    const readyLtaFolder = path.join(
+      config.directories.signedLtas,
+      `LTA N° ${lta.ltaRef} READY`,
+    );
+    const problemLtaFolder = path.join(
+      config.directories.signedLtas,
+      `LTA N° ${lta.ltaRef} PROBLEM`,
+    );
+    const readyExists = await fs.pathExists(readyLtaFolder);
+    const problemExists = await fs.pathExists(problemLtaFolder);
+    const ltaFolder = problemExists
+      ? problemLtaFolder
+      : readyExists
+        ? readyLtaFolder
+        : normalLtaFolder;
 
-    onLog("info", `Processing LTA ${lta.ltaRef}`, {
+    await fs.ensureDir(ltaFolder);
+    const ltaLogPath = path.join(ltaFolder, `${lta.ltaRef}.log`);
+
+    const emit = (level, message, meta = {}) => {
+      onLog(level, message, meta);
+      appendLtaLog(ltaLogPath, level, message, meta);
+    };
+
+    emit("info", `Processing LTA ${lta.ltaRef}`, {
       ltaFile: lta.fileName,
       dumsCount: lta.dums.length,
+      validDums: lta.validDums,
+      invalidDums: lta.invalidDums,
     });
 
     for (const dum of lta.dums) {
@@ -503,11 +542,23 @@ export const runSigningJob = async ({
         outputPdf: pdfPath,
       };
 
+      if (dum.isValid === false || !dum.serie || !dum.key) {
+        result.status = "failed";
+        result.reason = dum.invalidReason || "Invalid/missing DUM series";
+        emit(
+          "error",
+          `✗ FAILED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}: ${result.reason}`,
+          { sourceCell: dum.sourceCell, rawSerie: dum.rawSerie },
+        );
+        results.push(result);
+        continue;
+      }
+
       // Resume mode: skip DUMs that are already signed on disk.
       if (await fs.pathExists(pdfPath)) {
         result.status = "skipped";
         result.reason = "Already signed (existing PDF found)";
-        onLog(
+        emit(
           "info",
           `↷ SKIPPED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef} already signed`,
           { outputPdf: pdfPath },
@@ -517,19 +568,19 @@ export const runSigningJob = async ({
       }
 
       try {
-        onLog("info", `Processing DUM ${dum.dumNumber} for LTA ${lta.ltaRef}`);
+        emit("info", `Processing DUM ${dum.dumNumber} for LTA ${lta.ltaRef}`);
 
-        onLog("debug", "Navigating to BADR Accueil...");
+        emit("debug", "Navigating to BADR Accueil...");
         await conn.navigateToAccueil();
-        onLog("debug", "✓ At BADR Accueil");
+        emit("debug", "✓ At BADR Accueil");
 
-        await openModifyDeclaration(conn, onLog);
-        await fillDeclarationSearch(conn, dum, onLog);
+        await openModifyDeclaration(conn, emit);
+        await fillDeclarationSearch(conn, dum, emit);
 
         const shipperCheck = await checkShipper(
           conn,
           shipperByFileName[lta.fileName] || "",
-          onLog,
+          emit,
         );
         if (!shipperCheck.ok) {
           throw new Error(
@@ -537,7 +588,7 @@ export const runSigningJob = async ({
           );
         }
 
-        const docsCheck = await checkRequiredDocuments(conn, onLog);
+        const docsCheck = await checkRequiredDocuments(conn, emit);
         if (!docsCheck.ok) {
           throw new Error(
             "Required annexed documents not found (transport + facture)",
@@ -545,24 +596,24 @@ export const runSigningJob = async ({
         }
 
         const expectedLot = `${lta.ltaNumericRef}/${dum.dumNumber}`;
-        const lotCheck = await checkPreapLot(conn, expectedLot, onLog);
+        const lotCheck = await checkPreapLot(conn, expectedLot, emit);
         if (!lotCheck.ok) {
           throw new Error(`Preapurement lot '${expectedLot}' not found`);
         }
 
-        await clickSecondValidate(conn, onLog);
-        await signDeclaration(conn, onLog);
+        await clickSecondValidate(conn, emit);
+        await signDeclaration(conn, emit);
 
-        await printAndSave(conn, pdfPath, onLog);
+        await printAndSave(conn, pdfPath, emit);
 
         result.status = "success";
         result.outputPdf = pdfPath;
-        onLog("info", `✓ SUCCESS - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}`, {
+        emit("info", `✓ SUCCESS - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}`, {
           outputPdf: pdfPath,
         });
       } catch (error) {
         result.reason = error.message;
-        onLog(
+        emit(
           "error",
           `✗ FAILED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}: ${error.message}`,
           {
@@ -578,10 +629,53 @@ export const runSigningJob = async ({
     const ltaSuccess = ltaResults.filter((r) => r.status === "success").length;
     const ltaSkipped = ltaResults.filter((r) => r.status === "skipped").length;
     const ltaFailed = ltaResults.filter((r) => r.status === "failed").length;
-    onLog(
-      "info",
-      `Completed LTA ${lta.ltaRef} (success=${ltaSuccess}, skipped=${ltaSkipped}, failed=${ltaFailed})`,
+    const expectedPdfCount = lta.dums.length;
+    const existingChecks = await Promise.all(
+      lta.dums.map((d) =>
+        fs.pathExists(
+          path.join(ltaFolder, `DUM ${d.dumNumber} LTA N°${lta.ltaRef}.pdf`),
+        ),
+      ),
     );
+    const existingPdfCount = existingChecks.filter(Boolean).length;
+    const allPdfsExist = existingPdfCount === expectedPdfCount;
+
+    emit(
+      "info",
+      `Completed LTA ${lta.ltaRef} (success=${ltaSuccess}, skipped=${ltaSkipped}, failed=${ltaFailed}, pdfs=${existingPdfCount}/${expectedPdfCount})`,
+    );
+
+    const isReady = allPdfsExist && ltaFailed === 0;
+    const targetFolder = isReady ? readyLtaFolder : problemLtaFolder;
+
+    if (ltaFolder !== targetFolder) {
+      if (!(await fs.pathExists(targetFolder))) {
+        await fs.move(ltaFolder, targetFolder);
+        for (const r of ltaResults) {
+          if (r.outputPdf) {
+            r.outputPdf = r.outputPdf.replace(ltaFolder, targetFolder);
+          }
+        }
+        emit(
+          isReady ? "info" : "warn",
+          isReady
+            ? `✓ LTA folder marked READY: ${path.basename(targetFolder)}`
+            : `⚠ LTA folder marked PROBLEM: ${path.basename(targetFolder)}`,
+        );
+      } else {
+        emit(
+          "warn",
+          `Target state folder already exists, keeping current folder: ${path.basename(targetFolder)}`,
+        );
+      }
+    } else {
+      emit(
+        isReady ? "info" : "warn",
+        isReady
+          ? `✓ LTA remains READY: ${path.basename(targetFolder)}`
+          : `⚠ LTA remains PROBLEM: ${path.basename(targetFolder)}`,
+      );
+    }
   }
 
   return results;

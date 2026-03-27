@@ -67,6 +67,9 @@ app.get("/api/lta-files", async (_req, res) => {
       filePath: item.filePath,
       ltaRef: item.ltaRef,
       dumsCount: item.dums.length,
+      totalDums: item.totalDums,
+      validDums: item.validDums,
+      invalidDums: item.invalidDums,
       dums: item.dums,
     })),
   );
