@@ -60,6 +60,20 @@ const firstVisible = async (page, selectors, timeout = 1500) => {
   return null;
 };
 
+const firstPresent = async (page, selectors) => {
+  const contexts = contextsFor(page);
+  for (const selector of selectors) {
+    for (const ctx of contexts) {
+      const loc = ctx.locator(selector).first();
+      const exists = (await loc.count().catch(() => 0)) > 0;
+      if (exists) {
+        return { ctx, loc, selector };
+      }
+    }
+  }
+  return null;
+};
+
 const detectBadrInternalError = async (conn) => {
   const page = conn.page;
   if (!page || page.isClosed()) {
@@ -169,6 +183,15 @@ const textInTable = async (page, tableSelector) => {
   return toUpperCompact(await hit.loc.innerText());
 };
 
+const openEnteteTab = async (page) => {
+  await clickFirst(page, [
+    "a[href='#mainTab:tab0']",
+    "li[role='tab'] a:has-text('Entête')",
+    "li[role='tab'] a:has-text('Entete')",
+  ]).catch(() => false);
+  await page.waitForTimeout(350);
+};
+
 const IMPRIMER_SELECTORS = [
   "#secure_imprimer",
   "a.ui-menuitem-link:has-text('IMPRIMER')",
@@ -180,6 +203,9 @@ const LOADING_SELECTORS = [
   "div.ui-blockui-content:has-text('Traitement en cours')",
   "div:has-text('Traitement en cours')",
 ];
+
+const PRINT_DOWNLOAD_TIMEOUT_MS = 60000;
+const PRINT_ATTEMPTS = 3;
 
 const appendLtaLog = (logPath, level, message, meta = {}) => {
   try {
@@ -387,16 +413,36 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
   }
 
   const page = conn.page;
-  const hit = await firstVisible(page, [
+  let hit = null;
+  const shipperSelectors = [
     "#mainTab\\:form0\\:nomOperateurExpediteur",
     "input[id$=':nomOperateurExpediteur']",
-  ]);
+    "div[id$=':panelExpeexpoced_content'] input[id*='nomOperateurExpediteur']",
+  ];
+
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await openEnteteTab(page);
+    hit = await firstVisible(page, shipperSelectors, 1000);
+    if (!hit) {
+      hit = await firstPresent(page, shipperSelectors);
+    }
+    if (hit) break;
+
+    onLog(
+      "debug",
+      `Shipper field not found yet (attempt ${attempt}/4), retrying...`,
+    );
+    await page.waitForTimeout(700);
+  }
+
   if (!hit) {
     onLog("warn", "✗ Could not find shipper field on page");
     return { ok: false, actual: "", expected: expectedShipper };
   }
 
-  const actual = await hit.loc.inputValue();
+  const actual = await hit.loc.inputValue().catch(async () => {
+    return hit.loc.evaluate((el) => el.value || el.getAttribute("value") || "");
+  });
   const ok = toUpperCompact(actual) === toUpperCompact(expectedShipper);
 
   if (ok) {
@@ -409,6 +455,15 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
     "warn",
     `✗ Shipper mismatch - expected: '${expectedShipper}' actual: '${actual}'. Updating BADR field...`,
   );
+
+  const isDisabled = await hit.loc.isDisabled().catch(() => false);
+  if (isDisabled) {
+    onLog(
+      "error",
+      "✗ Shipper field is disabled and value mismatched; cannot auto-correct",
+    );
+    return { ok: false, actual, expected: expectedShipper, disabled: true };
+  }
 
   await hit.loc.fill("");
   await hit.loc.fill(expectedShipper);
@@ -668,70 +723,103 @@ const signDeclaration = async (conn, onLog) => {
   onLog("debug", "✓ Page stabilized");
 };
 
+const verifyPdfSaved = async (targetPath) => {
+  const exists = await fs.pathExists(targetPath);
+  if (!exists) {
+    return { ok: false, reason: "PDF file not found on disk after print" };
+  }
+
+  const stats = await fs.stat(targetPath).catch(() => null);
+  const size = stats?.size || 0;
+  if (size < 1024) {
+    return {
+      ok: false,
+      reason: `PDF file is too small (${size} bytes), likely invalid`,
+      size,
+    };
+  }
+
+  return { ok: true, size };
+};
+
 const printAndSave = async (conn, targetPath, onLog) => {
   const page = conn.page;
   await fs.ensureDir(path.dirname(targetPath));
 
   await ensureNoBadrInternalError(conn, onLog, "print start");
 
-  // Start waiting for the download before clicking IMPRIMER to avoid missing the event.
-  const downloadPromise = page.waitForEvent("download", {
-    timeout: config.timeout,
-  });
-
   onLog("debug", "Waiting for IMPRIMER button to be clickable...");
 
   // Extra wait to ensure button is fully rendered and responsive
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1200);
 
-  // Try to find and click IMPRIMER button with multiple attempts
-  let imprimerClicked = false;
-  let retries = 0;
-  const maxRetries = 3;
+  let lastError = "";
 
-  while (!imprimerClicked && retries < maxRetries) {
-    try {
-      await ensureNoBadrInternalError(
-        conn,
-        onLog,
-        `print click attempt ${retries + 1}`,
-      );
+  for (let attempt = 1; attempt <= PRINT_ATTEMPTS; attempt++) {
+    await ensureNoBadrInternalError(conn, onLog, `print attempt ${attempt}`);
 
-      onLog(
-        "debug",
-        `Attempting to click IMPRIMER (attempt ${retries + 1}/${maxRetries})...`,
-      );
+    // Start waiting for the download before clicking IMPRIMER.
+    const downloadPromise = page
+      .waitForEvent("download", {
+        timeout: Math.min(config.timeout, PRINT_DOWNLOAD_TIMEOUT_MS),
+      })
+      .catch(() => null);
 
-      imprimerClicked = await clickFirst(page, IMPRIMER_SELECTORS);
+    onLog(
+      "debug",
+      `Attempting to click IMPRIMER (attempt ${attempt}/${PRINT_ATTEMPTS})...`,
+    );
 
-      if (imprimerClicked) {
-        onLog("debug", "✓ IMPRIMER clicked");
-        break;
-      }
-
-      retries++;
-      if (retries < maxRetries) {
-        onLog("debug", `IMPRIMER not found, waiting 1s before retry...`);
-        await page.waitForTimeout(1000);
-      }
-    } catch (e) {
-      retries++;
+    const imprimerClicked = await clickFirst(page, IMPRIMER_SELECTORS);
+    if (!imprimerClicked) {
+      lastError = "Could not click IMPRIMER";
+      onLog("warn", `${lastError} on attempt ${attempt}`);
       await page.waitForTimeout(1000);
+      continue;
     }
+
+    onLog("debug", "✓ IMPRIMER clicked");
+    onLog("debug", "Waiting for PDF download...");
+
+    const download = await downloadPromise;
+    if (!download) {
+      lastError = "No PDF download event captured after IMPRIMER";
+      onLog("warn", `${lastError} (attempt ${attempt})`);
+      await page.waitForTimeout(1200);
+      continue;
+    }
+
+    const tempPath = `${targetPath}.part`;
+    await fs.remove(tempPath).catch(() => null);
+
+    await download.saveAs(tempPath);
+    await ensureNoBadrInternalError(conn, onLog, "print saveAs done");
+
+    await fs.move(tempPath, targetPath, { overwrite: true });
+
+    const pdfCheck = await verifyPdfSaved(targetPath);
+    if (!pdfCheck.ok) {
+      lastError = pdfCheck.reason;
+      onLog("warn", `Printed file invalid (attempt ${attempt})`, {
+        reason: pdfCheck.reason,
+      });
+      await fs.remove(targetPath).catch(() => null);
+      await page.waitForTimeout(800);
+      continue;
+    }
+
+    await ensureNoBadrInternalError(conn, onLog, "print done");
+    onLog("info", "✓ PDF SAVED", {
+      filename: path.basename(targetPath),
+      fullPath: targetPath,
+      size: pdfCheck.size,
+    });
+    return;
   }
 
-  if (!imprimerClicked) {
-    throw new Error("Could not click IMPRIMER button after 3 attempts");
-  }
-
-  onLog("debug", "Waiting for PDF download...");
-  const download = await downloadPromise;
-  await download.saveAs(targetPath);
-  await ensureNoBadrInternalError(conn, onLog, "print done");
-  onLog("info", "✓ PDF SAVED", {
-    filename: path.basename(targetPath),
-    fullPath: targetPath,
-  });
+  throw new Error(
+    `Print failed after ${PRINT_ATTEMPTS} attempts: ${lastError || "unknown print error"}`,
+  );
 };
 
 export const runSigningJob = async ({
@@ -866,6 +954,13 @@ export const runSigningJob = async ({
             await signDeclaration(conn, emit);
 
             await printAndSave(conn, pdfPath, emit);
+
+            const finalPdfCheck = await verifyPdfSaved(pdfPath);
+            if (!finalPdfCheck.ok) {
+              throw new Error(
+                `PDF verification failed after print: ${finalPdfCheck.reason}`,
+              );
+            }
 
             result.status = "success";
             result.outputPdf = pdfPath;
