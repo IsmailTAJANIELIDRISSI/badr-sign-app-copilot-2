@@ -28,7 +28,6 @@
     ],
     "certificateFile": null,
     "certificatePassword": null,
-    "signingHashAlgorithms": ["sha256"],
     "sign": null
   },
   "nsis": {

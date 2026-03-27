@@ -47,19 +47,42 @@ const createWindow = () => {
 const startApiServer = () => {
   return new Promise((resolve) => {
     const apiScript = path.join(__dirname, "..", "server", "index.js");
-    apiProcess = spawn("node", [apiScript], {
+    const command = isDev ? "node" : process.execPath;
+    const args = isDev ? [apiScript] : [apiScript];
+    const startupTimeoutMs = 6000;
+
+    // In packaged builds, run the backend with Electron's embedded Node runtime.
+    apiProcess = spawn(command, args, {
       stdio: "pipe",
+      cwd: path.join(__dirname, ".."),
       env: {
         ...process.env,
         NODE_ENV: isDev ? "development" : "production",
         ELECTRON_APP: "true",
+        ...(isDev ? {} : { ELECTRON_RUN_AS_NODE: "1" }),
       },
     });
+
+    let settled = false;
+    const settle = () => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(startupTimer);
+        resolve();
+      }
+    };
+
+    const startupTimer = setTimeout(() => {
+      console.warn(
+        `[API] startup timeout after ${startupTimeoutMs}ms, continuing UI startup`,
+      );
+      settle();
+    }, startupTimeoutMs);
 
     apiProcess.stdout.on("data", (data) => {
       console.log(`[API] ${data}`);
       if (String(data).includes("listening")) {
-        resolve();
+        settle();
       }
     });
 
@@ -69,7 +92,14 @@ const startApiServer = () => {
 
     apiProcess.on("error", (err) => {
       console.error("Failed to start API server:", err);
-      resolve(); // Still proceed
+      settle(); // Still proceed
+    });
+
+    apiProcess.on("exit", (code, signal) => {
+      console.error(
+        `[API] process exited before ready (code=${code}, signal=${signal})`,
+      );
+      settle();
     });
   });
 };

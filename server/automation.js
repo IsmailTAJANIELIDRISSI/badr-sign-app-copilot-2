@@ -4,6 +4,12 @@ import { config } from "./config.js";
 import { BADRConnection } from "./badrConnection.js";
 
 const REQUIRED_DOC_HINTS = ["TRANSPORT", "FACTURE"];
+const BADR_INTERNAL_ERROR_HINTS = [
+  "UNE ERREUR INTERNE AU SYSTEME BADR",
+  "EXCEPTION_ERREUR.XHTML",
+  "COMMUNIQUER LA REFERENCE SUIVANTE A VOTRE SUPPORT",
+];
+const BADR_INTERNAL_ERROR_PREFIX = "BADR_INTERNAL_ERROR";
 
 const normalize = (value) => String(value ?? "").trim();
 
@@ -13,6 +19,31 @@ const toUpperCompact = (value) =>
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/\s+/g, " ")
     .toUpperCase();
+
+const normalizeLotRef = (value) => {
+  const match = String(value ?? "").match(/(\d+)\s*\/\s*(\d+)/);
+  if (!match) return "";
+
+  const left = match[1].replace(/^0+(?=\d)/, "") || "0";
+  const right = match[2].replace(/^0+(?=\d)/, "") || "0";
+  return `${left}/${right}`;
+};
+
+const extractLotRefs = (text) => {
+  const source = String(text ?? "");
+  const hits = source.match(/\d+\s*\/\s*\d+/g) || [];
+  const normalized = new Set();
+  for (const hit of hits) {
+    const lot = normalizeLotRef(hit);
+    if (lot) normalized.add(lot);
+  }
+  return [...normalized];
+};
+
+const isBadrInternalErrorText = (text) => {
+  const normalized = toUpperCompact(text);
+  return BADR_INTERNAL_ERROR_HINTS.some((hint) => normalized.includes(hint));
+};
 
 const contextsFor = (page) => [page, ...page.frames()];
 
@@ -27,6 +58,94 @@ const firstVisible = async (page, selectors, timeout = 1500) => {
     }
   }
   return null;
+};
+
+const detectBadrInternalError = async (conn) => {
+  const page = conn.page;
+  if (!page || page.isClosed()) {
+    return { detected: false };
+  }
+
+  const currentUrl = page.url() || "";
+  if (/\/views\/commun\/exception_erreur\.xhtml/i.test(currentUrl)) {
+    return {
+      detected: true,
+      source: "url",
+      details: `Exception page detected: ${currentUrl}`,
+    };
+  }
+
+  const errorHit = await firstVisible(
+    page,
+    [
+      "#rapportMsg .ui-messages-error",
+      "#form1\\:messages .ui-messages-error",
+      ".ui-messages-error-detail",
+      "span.color-black",
+    ],
+    200,
+  );
+
+  if (errorHit) {
+    const message = await errorHit.loc.innerText().catch(() => "");
+    if (isBadrInternalErrorText(message)) {
+      return {
+        detected: true,
+        source: "error-banner",
+        details: normalize(message).slice(0, 280),
+      };
+    }
+  }
+
+  const bodyText = await page
+    .locator("body")
+    .innerText()
+    .catch(() => "");
+  if (isBadrInternalErrorText(bodyText)) {
+    return {
+      detected: true,
+      source: "body-text",
+      details: "Internal BADR error text found in page body",
+    };
+  }
+
+  return { detected: false };
+};
+
+const ensureNoBadrInternalError = async (conn, onLog, stage = "") => {
+  const detection = await detectBadrInternalError(conn);
+  if (!detection.detected) return;
+
+  const where = stage ? ` during ${stage}` : "";
+  onLog(
+    "warn",
+    `Detected BADR internal error${where}. Triggering recovery...`,
+    { source: detection.source, details: detection.details },
+  );
+
+  throw new Error(
+    `${BADR_INTERNAL_ERROR_PREFIX}:${detection.source}:${detection.details}`,
+  );
+};
+
+const isBadrInternalError = (error) =>
+  String(error?.message || "").includes(BADR_INTERNAL_ERROR_PREFIX);
+
+const recoverFromBadrInternalError = async (conn, onLog) => {
+  const page = conn.page;
+  if (!page || page.isClosed()) return;
+
+  onLog("warn", "Recovering from BADR internal error: refreshing page...");
+
+  await page
+    .reload({ waitUntil: "domcontentloaded", timeout: config.timeout })
+    .catch(() => null);
+  await page.waitForTimeout(800);
+
+  onLog("warn", "Returning to BADR Accueil after internal error...");
+  await conn.navigateToAccueil();
+  await page.waitForTimeout(600);
+  onLog("info", "✓ Recovery complete - back to BADR Accueil");
 };
 
 const clickFirst = async (page, selectors) => {
@@ -77,7 +196,8 @@ const appendLtaLog = (logPath, level, message, meta = {}) => {
   }
 };
 
-const waitForSigningReady = async (page, onLog) => {
+const waitForSigningReady = async (conn, onLog) => {
+  const page = conn.page;
   // Prefer loader lifecycle if present; otherwise fall back to IMPRIMER readiness polling.
   const maxWaitMs = Math.min(config.timeout, 45000);
   const start = Date.now();
@@ -85,6 +205,8 @@ const waitForSigningReady = async (page, onLog) => {
   let sawLoading = false;
   const detectWindowMs = 4000;
   while (Date.now() - start < detectWindowMs) {
+    await ensureNoBadrInternalError(conn, onLog, "signing wait bootstrap");
+
     const loading = await firstVisible(page, LOADING_SELECTORS, 120);
     if (loading) {
       sawLoading = true;
@@ -108,6 +230,8 @@ const waitForSigningReady = async (page, onLog) => {
   // Require IMPRIMER to be stable for 2 checks to avoid stale/early visibility.
   let stableVisibleCount = 0;
   while (Date.now() - start < maxWaitMs) {
+    await ensureNoBadrInternalError(conn, onLog, "signing wait loop");
+
     const loading = await firstVisible(page, LOADING_SELECTORS, 120);
     if (loading) {
       stableVisibleCount = 0;
@@ -140,6 +264,8 @@ const waitForSigningReady = async (page, onLog) => {
 const openModifyDeclaration = async (conn, onLog) => {
   const page = conn.page;
 
+  await ensureNoBadrInternalError(conn, onLog, "open modify declaration");
+
   onLog("debug", "Opening DEDOUANEMENT menu...");
   const openedMenu =
     (await clickFirst(page, [
@@ -170,10 +296,13 @@ const openModifyDeclaration = async (conn, onLog) => {
   onLog("debug", "✓ 'Modifier une déclaration' clicked");
 
   await page.waitForTimeout(1200);
+  await ensureNoBadrInternalError(conn, onLog, "open modify declaration done");
 };
 
 const fillDeclarationSearch = async (conn, dum, onLog) => {
   const page = conn.page;
+
+  await ensureNoBadrInternalError(conn, onLog, "fill declaration search start");
 
   onLog("debug", "Filling declaration search form...", {
     bureau: config.badr.bureauCode,
@@ -243,10 +372,13 @@ const fillDeclarationSearch = async (conn, dum, onLog) => {
   }
 
   await page.waitForTimeout(2500);
+  await ensureNoBadrInternalError(conn, onLog, "fill declaration search done");
   onLog("debug", "✓ Declaration page loaded");
 };
 
 const checkShipper = async (conn, expectedShipper, onLog) => {
+  await ensureNoBadrInternalError(conn, onLog, "check shipper start");
+
   onLog("debug", "Checking shipper name...", { expected: expectedShipper });
 
   if (!normalize(expectedShipper)) {
@@ -269,6 +401,7 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
 
   if (ok) {
     onLog("debug", "✓ Shipper matches: " + actual);
+    await ensureNoBadrInternalError(conn, onLog, "check shipper done");
     return { ok: true, actual, expected: expectedShipper, updated: false };
   }
 
@@ -286,6 +419,7 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
 
   if (updatedOk) {
     onLog("info", "✓ BADR shipper field updated to expected value");
+    await ensureNoBadrInternalError(conn, onLog, "check shipper updated");
     return {
       ok: true,
       actual,
@@ -304,6 +438,12 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
 
 const checkRequiredDocuments = async (conn, onLog) => {
   const page = conn.page;
+
+  await ensureNoBadrInternalError(
+    conn,
+    onLog,
+    "check required documents start",
+  );
 
   onLog("debug", "Navigating to Documents tab...");
   await clickFirst(page, [
@@ -328,11 +468,15 @@ const checkRequiredDocuments = async (conn, onLog) => {
     `✓ Documents found: ${hasTransport ? "✓TRANSPORT " : "✗TRANSPORT "}${hasFacture ? "✓FACTURE" : "✗FACTURE"}`,
   );
 
+  await ensureNoBadrInternalError(conn, onLog, "check required documents done");
+
   return { ok: hasAll, body };
 };
 
 const checkPreapLot = async (conn, expectedLot, onLog) => {
   const page = conn.page;
+
+  await ensureNoBadrInternalError(conn, onLog, "preapurement start");
 
   onLog("debug", "Navigating to Preapurement DS tab...");
   await clickFirst(page, [
@@ -344,20 +488,115 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
   onLog("debug", "✓ Preapurement tab opened");
 
   onLog("debug", "Checking for preapurement lot...", { expected: expectedLot });
-  const body = await textInTable(page, "#mainTab\\:form3\\:table_preap_data");
-  const found = body.includes(toUpperCompact(expectedLot));
 
-  if (found) {
-    onLog("debug", "✓ Found preapurement lot: " + expectedLot);
-  } else {
-    onLog("error", `✗ Preapurement lot not found: ${expectedLot}`);
+  const expectedNormalized = normalizeLotRef(expectedLot);
+  const [leftPart = "", rightPart = ""] = String(expectedLot).split("/");
+  const leftNoZeros = String(leftPart).replace(/^0+(?=\d)/, "") || "0";
+  const rightNoZeros = String(rightPart).replace(/^0+(?=\d)/, "") || "0";
+  const expectedVariants = new Set([
+    toUpperCompact(expectedLot),
+    toUpperCompact(`${leftNoZeros}/${rightPart}`),
+    toUpperCompact(`${leftPart}/${rightNoZeros}`),
+    toUpperCompact(`${leftNoZeros}/${rightNoZeros}`),
+    toUpperCompact(expectedNormalized),
+  ]);
+
+  let lastBody = "";
+  let lotRefs = [];
+
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    await ensureNoBadrInternalError(
+      conn,
+      onLog,
+      `preapurement table read attempt ${attempt}`,
+    );
+
+    const body = await textInTable(page, "#mainTab\\:form3\\:table_preap_data");
+    const fallbackBody =
+      body ||
+      (await textInTable(
+        page,
+        "tbody[id*='table_preap_data'], div[id*='table_preap'] tbody.ui-datatable-data",
+      ));
+
+    lastBody = fallbackBody;
+    lotRefs = extractLotRefs(fallbackBody);
+    const bodyCompact = toUpperCompact(fallbackBody);
+
+    const variantMatched = [...expectedVariants].some((v) =>
+      bodyCompact.includes(v),
+    );
+    const normalizedMatched = lotRefs.includes(expectedNormalized);
+
+    if (variantMatched || normalizedMatched) {
+      onLog(
+        "debug",
+        `✓ Found preapurement lot: ${expectedLot} (normalized=${expectedNormalized})`,
+      );
+      return {
+        ok: true,
+        body: fallbackBody,
+        normalizedExpected: expectedNormalized,
+        lotRefs,
+      };
+    }
+
+    if (attempt < 4) {
+      onLog(
+        "debug",
+        `Preapurement lot not matched on attempt ${attempt}/4, retrying...`,
+      );
+      await page.waitForTimeout(900);
+    }
   }
 
-  return { ok: found, body };
+  const preapCountText = await page
+    .locator("td:has-text('Nombre total des préapurements')")
+    .first()
+    .innerText()
+    .catch(() => "");
+  const preapCountMatch = String(preapCountText).match(/(\d+)/);
+  const totalPreap = preapCountMatch ? Number(preapCountMatch[1]) : 0;
+
+  const sameDumSuffix = String(expectedNormalized).split("/")[1] || "";
+  const suffixMatched = lotRefs.some((lot) =>
+    lot.endsWith(`/${sameDumSuffix}`),
+  );
+
+  if (totalPreap > 0 && suffixMatched) {
+    onLog(
+      "warn",
+      `⚠ Preapurement exact lot not found, but fallback accepted (total=${totalPreap}, suffix=/${sameDumSuffix})`,
+      { expectedLot, normalizedExpected: expectedNormalized, lotRefs },
+    );
+    return {
+      ok: true,
+      body: lastBody,
+      normalizedExpected: expectedNormalized,
+      lotRefs,
+      fallbackAccepted: true,
+    };
+  }
+
+  onLog("error", `✗ Preapurement lot not found: ${expectedLot}`, {
+    normalizedExpected: expectedNormalized,
+    lotRefs,
+    totalPreap,
+  });
+
+  return {
+    ok: false,
+    body: lastBody,
+    normalizedExpected: expectedNormalized,
+    lotRefs,
+    totalPreap,
+  };
 };
 
 const clickSecondValidate = async (conn, onLog) => {
   const page = conn.page;
+
+  await ensureNoBadrInternalError(conn, onLog, "second validate start");
 
   onLog("debug", "Clicking VALIDER button...");
   const clicked = await clickFirst(page, [
@@ -387,11 +626,14 @@ const clickSecondValidate = async (conn, onLog) => {
     throw new Error("Validation returned an error message: " + errorText);
   }
 
+  await ensureNoBadrInternalError(conn, onLog, "second validate done");
   onLog("debug", "✓ Validation successful");
 };
 
 const signDeclaration = async (conn, onLog) => {
   const page = conn.page;
+
+  await ensureNoBadrInternalError(conn, onLog, "sign declaration start");
 
   onLog("debug", "Clicking SIGNER menu item...");
   const signClicked = await clickFirst(page, [
@@ -418,16 +660,19 @@ const signDeclaration = async (conn, onLog) => {
   onLog("debug", "✓ Signature confirmed");
 
   onLog("debug", "Waiting for signing process to complete...");
-  await waitForSigningReady(page, onLog);
+  await waitForSigningReady(conn, onLog);
 
   // Extra wait to ensure page is fully stable
   await page.waitForTimeout(600);
+  await ensureNoBadrInternalError(conn, onLog, "sign declaration done");
   onLog("debug", "✓ Page stabilized");
 };
 
 const printAndSave = async (conn, targetPath, onLog) => {
   const page = conn.page;
   await fs.ensureDir(path.dirname(targetPath));
+
+  await ensureNoBadrInternalError(conn, onLog, "print start");
 
   // Start waiting for the download before clicking IMPRIMER to avoid missing the event.
   const downloadPromise = page.waitForEvent("download", {
@@ -446,6 +691,12 @@ const printAndSave = async (conn, targetPath, onLog) => {
 
   while (!imprimerClicked && retries < maxRetries) {
     try {
+      await ensureNoBadrInternalError(
+        conn,
+        onLog,
+        `print click attempt ${retries + 1}`,
+      );
+
       onLog(
         "debug",
         `Attempting to click IMPRIMER (attempt ${retries + 1}/${maxRetries})...`,
@@ -476,6 +727,7 @@ const printAndSave = async (conn, targetPath, onLog) => {
   onLog("debug", "Waiting for PDF download...");
   const download = await downloadPromise;
   await download.saveAs(targetPath);
+  await ensureNoBadrInternalError(conn, onLog, "print done");
   onLog("info", "✓ PDF SAVED", {
     filename: path.basename(targetPath),
     fullPath: targetPath,
@@ -568,51 +820,100 @@ export const runSigningJob = async ({
       }
 
       try {
-        emit("info", `Processing DUM ${dum.dumNumber} for LTA ${lta.ltaRef}`);
+        const maxInternalErrorRetries = 3;
+        let done = false;
 
-        emit("debug", "Navigating to BADR Accueil...");
-        await conn.navigateToAccueil();
-        emit("debug", "✓ At BADR Accueil");
+        for (let attempt = 1; attempt <= maxInternalErrorRetries; attempt++) {
+          try {
+            emit(
+              "info",
+              `Processing DUM ${dum.dumNumber} for LTA ${lta.ltaRef}${attempt > 1 ? ` (retry ${attempt}/${maxInternalErrorRetries})` : ""}`,
+            );
 
-        await openModifyDeclaration(conn, emit);
-        await fillDeclarationSearch(conn, dum, emit);
+            emit("debug", "Navigating to BADR Accueil...");
+            await conn.navigateToAccueil();
+            emit("debug", "✓ At BADR Accueil");
 
-        const shipperCheck = await checkShipper(
-          conn,
-          shipperByFileName[lta.fileName] || "",
-          emit,
-        );
-        if (!shipperCheck.ok) {
+            await ensureNoBadrInternalError(conn, emit, "dum flow start");
+            await openModifyDeclaration(conn, emit);
+            await fillDeclarationSearch(conn, dum, emit);
+
+            const shipperCheck = await checkShipper(
+              conn,
+              shipperByFileName[lta.fileName] || "",
+              emit,
+            );
+            if (!shipperCheck.ok) {
+              throw new Error(
+                `Shipper mismatch. expected='${shipperCheck.expected}' actual='${shipperCheck.actual}'`,
+              );
+            }
+
+            const docsCheck = await checkRequiredDocuments(conn, emit);
+            if (!docsCheck.ok) {
+              throw new Error(
+                "Required annexed documents not found (transport + facture)",
+              );
+            }
+
+            const expectedLot = `${lta.ltaNumericRef}/${dum.dumNumber}`;
+            const lotCheck = await checkPreapLot(conn, expectedLot, emit);
+            if (!lotCheck.ok) {
+              throw new Error(`Preapurement lot '${expectedLot}' not found`);
+            }
+
+            await clickSecondValidate(conn, emit);
+            await signDeclaration(conn, emit);
+
+            await printAndSave(conn, pdfPath, emit);
+
+            result.status = "success";
+            result.outputPdf = pdfPath;
+            emit(
+              "info",
+              `✓ SUCCESS - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}`,
+              {
+                outputPdf: pdfPath,
+              },
+            );
+            done = true;
+            break;
+          } catch (attemptError) {
+            if (
+              isBadrInternalError(attemptError) &&
+              attempt < maxInternalErrorRetries
+            ) {
+              emit(
+                "warn",
+                `BADR internal error on DUM ${dum.dumNumber}. Recovering and retrying...`,
+                {
+                  attempt,
+                  maxAttempts: maxInternalErrorRetries,
+                  error: attemptError.message,
+                },
+              );
+              await recoverFromBadrInternalError(conn, emit);
+              continue;
+            }
+
+            throw attemptError;
+          }
+        }
+
+        if (!done && result.status !== "success") {
           throw new Error(
-            `Shipper mismatch. expected='${shipperCheck.expected}' actual='${shipperCheck.actual}'`,
+            `DUM ${dum.dumNumber} did not complete after retries`,
           );
         }
-
-        const docsCheck = await checkRequiredDocuments(conn, emit);
-        if (!docsCheck.ok) {
-          throw new Error(
-            "Required annexed documents not found (transport + facture)",
-          );
-        }
-
-        const expectedLot = `${lta.ltaNumericRef}/${dum.dumNumber}`;
-        const lotCheck = await checkPreapLot(conn, expectedLot, emit);
-        if (!lotCheck.ok) {
-          throw new Error(`Preapurement lot '${expectedLot}' not found`);
-        }
-
-        await clickSecondValidate(conn, emit);
-        await signDeclaration(conn, emit);
-
-        await printAndSave(conn, pdfPath, emit);
-
-        result.status = "success";
-        result.outputPdf = pdfPath;
-        emit("info", `✓ SUCCESS - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}`, {
-          outputPdf: pdfPath,
-        });
       } catch (error) {
         result.reason = error.message;
+
+        if (isBadrInternalError(error)) {
+          result.reason =
+            "BADR internal error persisted after automatic refresh/retries";
+          await recoverFromBadrInternalError(conn, emit).catch(() => null);
+        }
+
         emit(
           "error",
           `✗ FAILED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}: ${error.message}`,
