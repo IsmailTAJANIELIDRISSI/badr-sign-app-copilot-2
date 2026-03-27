@@ -10,10 +10,12 @@
     "server/**/*",
     "node_modules/**/*",
     "electron/**/*",
+    "assets/**/*",
     ".env.production",
     "package.json"
   ],
   "win": {
+    "icon": "assets/icon.ico",
     "target": [
       {
         "target": "nsis",
@@ -34,7 +36,10 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "BADR DUM Signing"
+    "shortcutName": "BADR DUM Signing",
+    "installerIcon": "assets/icon.ico",
+    "uninstallerIcon": "assets/icon.ico",
+    "installerHeaderIcon": "assets/icon.ico"
   },
   "portable": {
     "artifactName": "BADR-DUM-Signing-${version}-portable.exe"

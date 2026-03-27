@@ -12,6 +12,11 @@ let mainWindow;
 let apiProcess;
 
 const createWindow = () => {
+  const appIcon =
+    process.platform === "win32"
+      ? path.join(__dirname, "..", "assets", "icon.ico")
+      : path.join(__dirname, "..", "assets", "icon.png");
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -21,7 +26,7 @@ const createWindow = () => {
       contextIsolation: true,
       enableRemoteModule: false,
     },
-    icon: path.join(__dirname, "..", "assets", "icon.png"),
+    icon: appIcon,
   });
 
   const startUrl = isDev
