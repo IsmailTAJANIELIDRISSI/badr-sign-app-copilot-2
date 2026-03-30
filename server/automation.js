@@ -34,17 +34,18 @@ const toUpperCompact = (value) =>
     .toUpperCase();
 
 const normalizeLotRef = (value) => {
-  const match = String(value ?? "").match(/(\d+)\s*\/\s*(\d+)/);
+  const match = String(value ?? "").match(/([0-9.\-\s]+)\s*\/\s*(\d+)/);
   if (!match) return "";
 
-  const left = match[1].replace(/^0+(?=\d)/, "") || "0";
+  const leftDigits = match[1].replace(/[^\d]/g, "");
+  const left = leftDigits.replace(/^0+(?=\d)/, "") || "0";
   const right = match[2].replace(/^0+(?=\d)/, "") || "0";
   return `${left}/${right}`;
 };
 
 const extractLotRefs = (text) => {
   const source = String(text ?? "");
-  const hits = source.match(/\d+\s*\/\s*\d+/g) || [];
+  const hits = source.match(/[0-9.\-\s]{3,}\s*\/\s*\d+/g) || [];
   const normalized = new Set();
   for (const hit of hits) {
     const lot = normalizeLotRef(hit);
@@ -219,9 +220,12 @@ const fillFirst = async (page, selectors, value) => {
 };
 
 const textInTable = async (page, tableSelector) => {
-  const hit = await firstVisible(page, [tableSelector]);
+  const hit = await firstPresent(page, [tableSelector]);
   if (!hit) return "";
-  return toUpperCompact(await hit.loc.innerText());
+  const text = await hit.loc
+    .innerText()
+    .catch(async () => (await hit.loc.textContent().catch(() => "")) || "");
+  return toUpperCompact(text);
 };
 
 const openEnteteTab = async (page) => {
@@ -461,7 +465,7 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
     "div[id$=':panelExpeexpoced_content'] input[id*='nomOperateurExpediteur']",
   ];
 
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= 6; attempt++) {
     await openEnteteTab(page);
     hit = await firstVisible(page, shipperSelectors, 1000);
     if (!hit) {
@@ -607,7 +611,7 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
   let lastBody = "";
   let lotRefs = [];
 
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= 6; attempt++) {
     await ensureNoBadrInternalError(
       conn,
       onLog,
@@ -644,12 +648,12 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
       };
     }
 
-    if (attempt < 4) {
+    if (attempt < 6) {
       onLog(
         "debug",
-        `Preapurement lot not matched on attempt ${attempt}/4, retrying...`,
+        `Preapurement lot not matched on attempt ${attempt}/6, retrying...`,
       );
-      await page.waitForTimeout(900);
+      await page.waitForTimeout(900 + attempt * 150);
     }
   }
 
