@@ -561,18 +561,74 @@ const checkRequiredDocuments = async (conn, onLog) => {
   onLog("debug", "✓ Documents tab opened");
 
   onLog("debug", "Checking for required documents (TRANSPORT + FACTURE)...");
-  const body = await textInTable(
-    page,
-    "#mainTab\\:form7\\:listeDocumentsAnnexes_data",
-  );
+  let body = "";
+  let hasTransport = false;
+  let hasFacture = false;
+  const TRANSPORT_PATTERNS = [/TRANSPORT/, /\bA0004\b/];
+  const FACTURE_PATTERNS = [/FACTURE/, /\bA0006\b/];
+  let docLinkBody = "";
+  let rowCount = 0;
 
-  const hasTransport = body.includes("TRANSPORT");
-  const hasFacture = body.includes("FACTURE");
+  for (let attempt = 1; attempt <= 6; attempt++) {
+    await ensureNoBadrInternalError(
+      conn,
+      onLog,
+      `documents table read attempt ${attempt}`,
+    );
+
+    const strictBody = await textInTable(
+      page,
+      "#mainTab\\:form7\\:listeDocumentsAnnexes_data",
+    );
+    const fallbackBody =
+      strictBody ||
+      (await textInTable(
+        page,
+        "tbody[id*='listeDocumentsAnnexes_data'], div[id*='listeDocumentsAnnexes'] tbody.ui-datatable-data, div[id*='listeDocumentsAnnexes']",
+      ));
+
+    const docsContainer = await firstPresent(page, [
+      "div[id*='listeDocumentsAnnexes']",
+    ]);
+    if (docsContainer) {
+      rowCount = await docsContainer.ctx
+        .locator("tbody[id*='listeDocumentsAnnexes_data'] tr[role='row']")
+        .count()
+        .catch(() => 0);
+
+      docLinkBody = toUpperCompact(
+        await docsContainer.ctx
+          .locator("div[id*='listeDocumentsAnnexes'] td[role='gridcell'] a")
+          .allInnerTexts()
+          .then((texts) => texts.join(" | "))
+          .catch(() => ""),
+      );
+    } else {
+      rowCount = 0;
+      docLinkBody = "";
+    }
+
+    body = fallbackBody;
+    const combinedBody = `${body} ${docLinkBody}`;
+    hasTransport = TRANSPORT_PATTERNS.some((re) => re.test(combinedBody));
+    hasFacture = FACTURE_PATTERNS.some((re) => re.test(combinedBody));
+    if (hasTransport && hasFacture) break;
+
+    if (attempt < 6) {
+      onLog(
+        "debug",
+        `Documents not fully detected on attempt ${attempt}/6 (rows=${rowCount}), retrying...`,
+      );
+      await page.waitForTimeout(700 + attempt * 120);
+    }
+  }
+
   const hasAll = hasTransport && hasFacture;
 
   onLog(
     hasAll ? "debug" : "error",
     `✓ Documents found: ${hasTransport ? "✓TRANSPORT " : "✗TRANSPORT "}${hasFacture ? "✓FACTURE" : "✗FACTURE"}`,
+    hasAll ? undefined : { rowCount },
   );
 
   await ensureNoBadrInternalError(conn, onLog, "check required documents done");
