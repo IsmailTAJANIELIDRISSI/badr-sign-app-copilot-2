@@ -243,6 +243,105 @@ const IMPRIMER_SELECTORS = [
   "span.ui-menuitem-text:has-text('IMPRIMER')",
 ];
 
+/** Prefer real links for clicks (span is only a visibility hint). */
+const IMPRIMER_CLICK_SELECTORS = [
+  "#secure_imprimer",
+  "a.ui-menuitem-link:has-text('IMPRIMER')",
+];
+
+/** PrimeFaces block UI / overlay can sit on top with pointer events even when classes look "hidden". */
+const waitForNoBlockingOverlay = async (page, timeoutMs = 90000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const blocking = await page.evaluate(() => {
+      const candidates = document.querySelectorAll(
+        "#j_id_9_blocker, .ui-widget-overlay.ui-blockui, .ui-blockui.ui-widget-overlay",
+      );
+      for (const el of candidates) {
+        const st = window.getComputedStyle(el);
+        if (st.display === "none" || st.visibility === "hidden") continue;
+        if (st.pointerEvents === "none") continue;
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+        return true;
+      }
+      return false;
+    });
+    if (!blocking) return true;
+    await page.waitForTimeout(200);
+  }
+  return false;
+};
+
+/** BADR hides #secure_imprimer after first click; retries must undo that. */
+const unhideImprimerButton = async (page) => {
+  await page.evaluate(() => {
+    const el = document.querySelector("#secure_imprimer");
+    if (!el) return;
+    el.removeAttribute("hidden");
+    el.style.removeProperty("display");
+    el.style.removeProperty("visibility");
+    if (typeof window.$ === "function") {
+      try {
+        window.$("#secure_imprimer").show();
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+};
+
+const clickImprimer = async (page) => {
+  await unhideImprimerButton(page);
+  await waitForNoBlockingOverlay(page, Math.min(config.timeout, 90000));
+
+  const hit = await firstVisible(page, IMPRIMER_CLICK_SELECTORS, 8000);
+  if (!hit) {
+    const viaJs = await page.evaluate(() => {
+      const a =
+        document.querySelector("#secure_imprimer") ||
+        [...document.querySelectorAll("a.ui-menuitem-link")].find((el) =>
+          (el.textContent || "").includes("IMPRIMER"),
+        );
+      if (!a) return false;
+      a.click();
+      return true;
+    });
+    return viaJs;
+  }
+
+  try {
+    await hit.loc.click({
+      timeout: Math.min(config.timeout, 120000),
+    });
+    return true;
+  } catch {
+    await page.evaluate(() => {
+      document
+        .querySelectorAll(
+          "#j_id_9_blocker, .ui-widget-overlay.ui-blockui, .ui-blockui.ui-widget-overlay",
+        )
+        .forEach((el) => {
+          el.style.pointerEvents = "none";
+        });
+    });
+    await unhideImprimerButton(page);
+    const again = await firstVisible(page, IMPRIMER_CLICK_SELECTORS, 5000);
+    if (again) {
+      await again.loc.click({ force: true, timeout: 20000 });
+      return true;
+    }
+    return await page.evaluate(() => {
+      const a = document.querySelector("#secure_imprimer");
+      if (a) {
+        a.click();
+        return true;
+      }
+      return false;
+    });
+  }
+};
+
 const LOADING_SELECTORS = [
   "#j_id_9:has-text('Traitement en cours')",
   "div.ui-blockui-content:has-text('Traitement en cours')",
@@ -296,6 +395,11 @@ const waitForSigningReady = async (conn, onLog) => {
         .catch(() => {});
       onLog("debug", "✓ Signing loader hidden");
     }
+  }
+
+  const remainingAfterLoader = Math.max(0, maxWaitMs - (Date.now() - start));
+  if (remainingAfterLoader > 0) {
+    await waitForNoBlockingOverlay(page, remainingAfterLoader);
   }
 
   // Require IMPRIMER to be stable for 2 checks to avoid stale/early visibility.
@@ -878,7 +982,7 @@ const printAndSave = async (conn, targetPath, onLog) => {
       `Attempting to click IMPRIMER (attempt ${attempt}/${PRINT_ATTEMPTS})...`,
     );
 
-    const imprimerClicked = await clickFirst(page, IMPRIMER_SELECTORS);
+    const imprimerClicked = await clickImprimer(page);
     if (!imprimerClicked) {
       lastError = "Could not click IMPRIMER";
       onLog("warn", `${lastError} on attempt ${attempt}`);

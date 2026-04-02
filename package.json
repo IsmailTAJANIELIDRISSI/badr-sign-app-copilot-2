@@ -1,6 +1,8 @@
 {
   "name": "badr-sign-app-2",
   "version": "0.1.0",
+  "description": "Desktop automation for BADR DUM validation and signing workflows.",
+  "author": "Medafrica Solutions",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +11,9 @@
     "dev:server": "tsx watch server/index.js",
     "dev:electron": "concurrently -n WEB,ELECTRON -c cyan,magenta \"npm run dev:web\" \"wait-on http://localhost:5173 && electron .\"",
     "build": "vite build",
-    "build:electron": "npm run build && electron-builder",
+    "build:electron": "npm run build && electron-builder --win nsis",
+    "build:electron:portable": "npm run build && electron-builder --win portable",
+    "build:electron:all": "npm run build && electron-builder",
     "preview": "vite preview",
     "start": "node server/index.js"
   },
