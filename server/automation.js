@@ -57,10 +57,7 @@ const parseLotRef = (value) => {
   if (!baseDigits) return null;
   const base = baseDigits.replace(/^0+(?=\d)/, "") || "0";
 
-  const suffixes = parts
-    .slice(1)
-    .map(normalizeLotSegment)
-    .filter(Boolean);
+  const suffixes = parts.slice(1).map(normalizeLotSegment).filter(Boolean);
 
   if (!suffixes.length) return null;
 
@@ -804,9 +801,11 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
   onLog("debug", "Checking for preapurement lot...", { expected: expectedLot });
 
   const expectedParsed = parseLotRef(expectedLot);
-  const expectedNormalized = expectedParsed?.normalized || normalizeLotRef(expectedLot);
+  const expectedNormalized =
+    expectedParsed?.normalized || normalizeLotRef(expectedLot);
   const expectedBase = expectedParsed?.base || "";
-  const expectedDum = expectedParsed?.suffixes?.[expectedParsed.suffixes.length - 1] || "";
+  const expectedDum =
+    expectedParsed?.suffixes?.[expectedParsed.suffixes.length - 1] || "";
 
   if (!expectedBase || !expectedDum) {
     onLog("error", "Invalid expected preapurement lot format", {
@@ -905,7 +904,9 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
       .innerText()
       .then((text) => {
         const normalizedBody = toUpperCompact(text);
-        const m = normalizedBody.match(/NOMBRE TOTAL DES PREAPUREMENTS[^0-9]*(\d+)/);
+        const m = normalizedBody.match(
+          /NOMBRE TOTAL DES PREAPUREMENTS[^0-9]*(\d+)/,
+        );
         return m ? m[1] : "";
       })
       .catch(() => ""));
