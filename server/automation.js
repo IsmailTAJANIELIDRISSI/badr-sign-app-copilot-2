@@ -33,25 +33,72 @@ const toUpperCompact = (value) =>
     .replace(/\s+/g, " ")
     .toUpperCase();
 
-const normalizeLotRef = (value) => {
-  const match = String(value ?? "").match(/([0-9.\-\s]+)\s*\/\s*(\d+)/);
-  if (!match) return "";
-
-  const leftDigits = match[1].replace(/[^\d]/g, "");
-  const left = leftDigits.replace(/^0+(?=\d)/, "") || "0";
-  const right = match[2].replace(/^0+(?=\d)/, "") || "0";
-  return `${left}/${right}`;
+const normalizeLotSegment = (segment) => {
+  const raw = String(segment ?? "").trim();
+  if (!raw) return "";
+  if (raw === "*") return "*";
+  const digits = raw.replace(/[^\d]/g, "");
+  if (!digits) return "";
+  return digits.replace(/^0+(?=\d)/, "") || "0";
 };
+
+const parseLotRef = (value) => {
+  const source = String(value ?? "").trim();
+  if (!source) return null;
+
+  const parts = source
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (parts.length < 2) return null;
+
+  const baseDigits = parts[0].replace(/[^\d]/g, "");
+  if (!baseDigits) return null;
+  const base = baseDigits.replace(/^0+(?=\d)/, "") || "0";
+
+  const suffixes = parts
+    .slice(1)
+    .map(normalizeLotSegment)
+    .filter(Boolean);
+
+  if (!suffixes.length) return null;
+
+  return {
+    base,
+    suffixes,
+    normalized: `${base}/${suffixes.join("/")}`,
+  };
+};
+
+const normalizeLotRef = (value) => parseLotRef(value)?.normalized || "";
 
 const extractLotRefs = (text) => {
   const source = String(text ?? "");
-  const hits = source.match(/[0-9.\-\s]{3,}\s*\/\s*\d+/g) || [];
+  const hits = source.match(/[0-9.\-\s]{3,}(?:\s*\/\s*(?:\d+|\*))+/g) || [];
   const normalized = new Set();
   for (const hit of hits) {
-    const lot = normalizeLotRef(hit);
-    if (lot) normalized.add(lot);
+    const parsed = parseLotRef(hit);
+    if (parsed) normalized.add(parsed.normalized);
   }
   return [...normalized];
+};
+
+const lotMatchesExpectedDum = (lotValue, expectedBase, expectedDum) => {
+  const parsed = parseLotRef(lotValue);
+  if (!parsed) return false;
+  if (parsed.base !== expectedBase) return false;
+
+  if (parsed.suffixes.includes("*")) return true;
+
+  const expected = normalizeLotSegment(expectedDum);
+  if (!expected) return false;
+
+  const last = parsed.suffixes[parsed.suffixes.length - 1];
+  if (last === expected) return true;
+
+  // Some BADR patterns include intermediate numbering (e.g. base/1/2).
+  return parsed.suffixes.includes(expected);
 };
 
 const isBadrInternalErrorText = (text) => {
@@ -756,7 +803,24 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
 
   onLog("debug", "Checking for preapurement lot...", { expected: expectedLot });
 
-  const expectedNormalized = normalizeLotRef(expectedLot);
+  const expectedParsed = parseLotRef(expectedLot);
+  const expectedNormalized = expectedParsed?.normalized || normalizeLotRef(expectedLot);
+  const expectedBase = expectedParsed?.base || "";
+  const expectedDum = expectedParsed?.suffixes?.[expectedParsed.suffixes.length - 1] || "";
+
+  if (!expectedBase || !expectedDum) {
+    onLog("error", "Invalid expected preapurement lot format", {
+      expectedLot,
+    });
+    return {
+      ok: false,
+      body: "",
+      normalizedExpected: expectedNormalized,
+      lotRefs: [],
+      totalPreap: 0,
+    };
+  }
+
   const [leftPart = "", rightPart = ""] = String(expectedLot).split("/");
   const leftNoZeros = String(leftPart).replace(/^0+(?=\d)/, "") || "0";
   const rightNoZeros = String(rightPart).replace(/^0+(?=\d)/, "") || "0";
@@ -766,6 +830,8 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
     toUpperCompact(`${leftPart}/${rightNoZeros}`),
     toUpperCompact(`${leftNoZeros}/${rightNoZeros}`),
     toUpperCompact(expectedNormalized),
+    toUpperCompact(`${expectedBase}/1/${expectedDum}`),
+    toUpperCompact(`${expectedBase}/1/*`),
   ]);
 
   let lastBody = "";
@@ -794,11 +860,22 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
       bodyCompact.includes(v),
     );
     const normalizedMatched = lotRefs.includes(expectedNormalized);
+    const semanticMatched = lotRefs.some((lot) =>
+      lotMatchesExpectedDum(lot, expectedBase, expectedDum),
+    );
 
-    if (variantMatched || normalizedMatched) {
+    if (variantMatched || normalizedMatched || semanticMatched) {
       onLog(
         "debug",
         `✓ Found preapurement lot: ${expectedLot} (normalized=${expectedNormalized})`,
+        {
+          matchedBy: semanticMatched
+            ? "semantic"
+            : normalizedMatched
+              ? "normalized"
+              : "variant",
+          lotRefs,
+        },
       );
       return {
         ok: true,
@@ -817,17 +894,27 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
     }
   }
 
-  const preapCountText = await page
-    .locator("td:has-text('Nombre total des préapurements')")
-    .first()
-    .innerText()
-    .catch(() => "");
+  const preapCountText =
+    (await page
+      .locator("td:has-text('Nombre total des préapurements')")
+      .first()
+      .innerText()
+      .catch(() => "")) ||
+    (await page
+      .locator("body")
+      .innerText()
+      .then((text) => {
+        const normalizedBody = toUpperCompact(text);
+        const m = normalizedBody.match(/NOMBRE TOTAL DES PREAPUREMENTS[^0-9]*(\d+)/);
+        return m ? m[1] : "";
+      })
+      .catch(() => ""));
   const preapCountMatch = String(preapCountText).match(/(\d+)/);
   const totalPreap = preapCountMatch ? Number(preapCountMatch[1]) : 0;
 
   const sameDumSuffix = String(expectedNormalized).split("/")[1] || "";
   const suffixMatched = lotRefs.some((lot) =>
-    lot.endsWith(`/${sameDumSuffix}`),
+    lotMatchesExpectedDum(lot, expectedBase, sameDumSuffix),
   );
 
   if (totalPreap > 0 && suffixMatched) {
