@@ -582,9 +582,20 @@ const fillDeclarationSearch = async (conn, dum, onLog) => {
   }
   onLog("debug", "✓ Valider clicked - waiting for declaration to load...");
 
-  // BADR loads the declaration via PrimeFaces AJAX — no full navigation fires.
-  // We must poll until the declaration tab panel (or shipper field) actually
-  // appears in the DOM instead of relying on a fixed sleep.
+  // BADR loads the declaration via PrimeFaces AJAX (no full navigation).
+  // Some responses arrive in <1s; others take 60-90s depending on BADR load.
+  //
+  // Three-phase wait:
+  //   Phase 1 – 5s detection window: look for the "Traitement en cours..."
+  //             overlay OR for declaration tabs already rendered.
+  //   Phase 2 – if overlay detected, wait for it to disappear (full timeout).
+  //   Phase 3 – poll for declaration tab indicators (remaining timeout).
+
+  const DECL_SPINNER_SELECTORS = [
+    "div.ui-blockui-content:has-text('Traitement en cours')",
+    "div.ui-blockui-content img[src*='ajax-loading']",
+  ];
+
   const DECLARATION_LOADED_SELECTORS = [
     "a[href='#mainTab:tab0']", // Entête tab link
     "input[id$=':nomOperateurExpediteur']", // shipper field
@@ -593,22 +604,56 @@ const fillDeclarationSearch = async (conn, dum, onLog) => {
     "div.ui-tabs", // any PrimeFaces tab panel
   ];
 
-  const LOAD_WAIT_MS = Math.min(config.timeout, 30000);
+  const maxWaitMs = config.timeout; // default 120 000 ms
   const loadStart = Date.now();
   let declarationLoaded = false;
 
-  while (Date.now() - loadStart < LOAD_WAIT_MS) {
-    await ensureNoBadrInternalError(
-      conn,
-      onLog,
-      "waiting for declaration load",
-    );
-    const hit = await firstPresent(page, DECLARATION_LOADED_SELECTORS);
-    if (hit) {
+  // Phase 1 — 5s detection window.
+  const detectDeadline = loadStart + 5000;
+  let sawSpinner = false;
+  while (Date.now() < detectDeadline) {
+    await ensureNoBadrInternalError(conn, onLog, "declaration load phase 1");
+    // Check if declaration already appeared before spinner.
+    const ready = await firstPresent(page, DECLARATION_LOADED_SELECTORS);
+    if (ready) {
       declarationLoaded = true;
       break;
     }
-    await page.waitForTimeout(400);
+    // Check for loading overlay.
+    const spinner = await firstVisible(page, DECL_SPINNER_SELECTORS, 200);
+    if (spinner) {
+      sawSpinner = true;
+      break;
+    }
+    await page.waitForTimeout(300);
+  }
+
+  // Phase 2 — wait for overlay to disappear.
+  if (sawSpinner && !declarationLoaded) {
+    onLog(
+      "debug",
+      "Detected BADR loading spinner — waiting for it to finish...",
+    );
+    const spinnerStill = await firstVisible(page, DECL_SPINNER_SELECTORS, 300);
+    if (spinnerStill) {
+      await spinnerStill.loc
+        .waitFor({ state: "hidden", timeout: maxWaitMs })
+        .catch(() => {});
+    }
+    onLog("debug", "✓ BADR loading spinner gone");
+  }
+
+  // Phase 3 — poll for declaration indicators with remaining timeout.
+  if (!declarationLoaded) {
+    while (Date.now() - loadStart < maxWaitMs) {
+      await ensureNoBadrInternalError(conn, onLog, "declaration load phase 3");
+      const hit = await firstPresent(page, DECLARATION_LOADED_SELECTORS);
+      if (hit) {
+        declarationLoaded = true;
+        break;
+      }
+      await page.waitForTimeout(400);
+    }
   }
 
   const elapsed = Math.round((Date.now() - loadStart) / 1000);
@@ -621,7 +666,7 @@ const fillDeclarationSearch = async (conn, dum, onLog) => {
     onLog("debug", `✓ Declaration page loaded (${elapsed}s)`);
   }
 
-  // Brief stabilisation pause for dynamic fields to render.
+  // Brief stabilisation pause for dynamic fields to finish rendering.
   await page.waitForTimeout(600);
   await ensureNoBadrInternalError(conn, onLog, "fill declaration search done");
 };
