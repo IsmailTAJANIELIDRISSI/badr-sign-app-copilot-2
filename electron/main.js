@@ -11,6 +11,91 @@ const __dirname = path.dirname(__filename);
 let mainWindow;
 let apiProcess;
 
+/**
+ * Run a git command in the project root and return { code, stdout, stderr }.
+ * Never throws — always resolves so startup is never blocked.
+ */
+const runGit = (args, cwd) => {
+  return new Promise((resolve) => {
+    const proc = spawn("git", args, { cwd, stdio: "pipe" });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => {
+      stdout += d;
+    });
+    proc.stderr.on("data", (d) => {
+      stderr += d;
+    });
+    proc.on("error", (err) =>
+      resolve({ code: -1, stdout, stderr: err.message }),
+    );
+    proc.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+  });
+};
+
+/**
+ * Auto-pull from origin/main on every dev startup.
+ *
+ * Strategy:
+ *  1. git stash --include-untracked   — saves any local tracked changes.
+ *     Files in .gitignore (dums/, outputs/, logs/, .env) are NEVER touched.
+ *  2. git pull origin main            — fast-forward to latest code.
+ *  3. git stash pop                   — restore saved local changes.
+ *
+ * Any step failure is logged as a warning and startup continues normally.
+ */
+const gitPull = async () => {
+  // Skip in packaged builds — no .git directory exists.
+  if (!isDev) {
+    console.log("[GIT] Skipping auto-pull in packaged build");
+    return;
+  }
+
+  const cwd = path.join(__dirname, "..");
+
+  // 1. Stash local tracked changes (gitignored files are left untouched).
+  const stash = await runGit(["stash", "--include-untracked"], cwd);
+  const stashed =
+    stash.code === 0 && !stash.stdout.includes("No local changes");
+  if (stash.code !== 0) {
+    console.warn(
+      `[GIT] stash failed (code=${stash.code}) — skipping pull to avoid data loss`,
+    );
+    return;
+  }
+  if (stashed) {
+    console.log("[GIT] Local changes stashed temporarily");
+  }
+
+  // 2. Pull latest code.
+  console.log("[GIT] Pulling latest from origin main...");
+  const pull = await runGit(["pull", "origin", "main"], cwd);
+  (pull.stdout + pull.stderr)
+    .split("\n")
+    .filter(Boolean)
+    .forEach((line) => console.log(`[GIT] ${line}`));
+
+  if (pull.code === 0) {
+    console.log("[GIT] ✓ Pull succeeded");
+  } else {
+    console.warn(
+      `[GIT] pull exited with code ${pull.code} — continuing startup anyway`,
+    );
+  }
+
+  // 3. Restore stashed changes (only if we stashed something).
+  if (stashed) {
+    const pop = await runGit(["stash", "pop"], cwd);
+    if (pop.code === 0) {
+      console.log("[GIT] Local changes restored");
+    } else {
+      console.warn(
+        `[GIT] stash pop failed (code=${pop.code}) — your changes are in git stash`,
+      );
+    }
+  }
+};
+
 const createWindow = () => {
   const appIcon =
     process.platform === "win32"
@@ -105,6 +190,7 @@ const startApiServer = () => {
 };
 
 app.on("ready", async () => {
+  await gitPull();
   await startApiServer();
   createWindow();
   setupMenu();

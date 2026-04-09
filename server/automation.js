@@ -580,19 +580,50 @@ const fillDeclarationSearch = async (conn, dum, onLog) => {
   if (!clicked) {
     throw new Error("Could not click Valider button");
   }
-  onLog("debug", "✓ Valider clicked - waiting for page load...");
+  onLog("debug", "✓ Valider clicked - waiting for declaration to load...");
 
-  // CRITICAL: Wait for the iframe/main content to load
-  // The declaration form loads inside an iframe or main tab area
-  try {
-    await page.waitForNavigation({ timeout: 3000 }).catch(() => {});
-  } catch (e) {
-    // Navigation might not happen, that's okay - just wait a bit more
+  // BADR loads the declaration via PrimeFaces AJAX — no full navigation fires.
+  // We must poll until the declaration tab panel (or shipper field) actually
+  // appears in the DOM instead of relying on a fixed sleep.
+  const DECLARATION_LOADED_SELECTORS = [
+    "a[href='#mainTab:tab0']", // Entête tab link
+    "input[id$=':nomOperateurExpediteur']", // shipper field
+    "#mainTab", // main tab container
+    "a[href='#mainTab:tab7']", // Documents tab link
+    "div.ui-tabs", // any PrimeFaces tab panel
+  ];
+
+  const LOAD_WAIT_MS = Math.min(config.timeout, 30000);
+  const loadStart = Date.now();
+  let declarationLoaded = false;
+
+  while (Date.now() - loadStart < LOAD_WAIT_MS) {
+    await ensureNoBadrInternalError(
+      conn,
+      onLog,
+      "waiting for declaration load",
+    );
+    const hit = await firstPresent(page, DECLARATION_LOADED_SELECTORS);
+    if (hit) {
+      declarationLoaded = true;
+      break;
+    }
+    await page.waitForTimeout(400);
   }
 
-  await page.waitForTimeout(2500);
+  const elapsed = Math.round((Date.now() - loadStart) / 1000);
+  if (!declarationLoaded) {
+    onLog(
+      "warn",
+      `Declaration form not detected after ${elapsed}s — continuing anyway`,
+    );
+  } else {
+    onLog("debug", `✓ Declaration page loaded (${elapsed}s)`);
+  }
+
+  // Brief stabilisation pause for dynamic fields to render.
+  await page.waitForTimeout(600);
   await ensureNoBadrInternalError(conn, onLog, "fill declaration search done");
-  onLog("debug", "✓ Declaration page loaded");
 };
 
 const checkShipper = async (conn, expectedShipper, onLog) => {
