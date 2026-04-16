@@ -1,4 +1,5 @@
 import path from "path";
+import os from "os";
 import fs from "fs-extra";
 import { config } from "./config.js";
 import { BADRConnection } from "./badrConnection.js";
@@ -392,7 +393,7 @@ const LOADING_SELECTORS = [
   "div:has-text('Traitement en cours')",
 ];
 
-const PRINT_DOWNLOAD_TIMEOUT_MS = 60000;
+const PRINT_DOWNLOAD_TIMEOUT_MS = 90000;
 const PRINT_ATTEMPTS = 3;
 
 const appendLtaLog = (logPath, level, message, meta = {}) => {
@@ -1118,35 +1119,146 @@ const verifyPdfSaved = async (targetPath) => {
   return { ok: true, size };
 };
 
+/**
+ * Click IMPRIMER assuming the blocking overlay has already been cleared
+ * externally.  Does NOT call waitForNoBlockingOverlay – the caller must do
+ * that before setting up the download listener to avoid a timeout race.
+ */
+const clickImprimerDirect = async (page) => {
+  await unhideImprimerButton(page);
+  const hit = await firstVisible(page, IMPRIMER_CLICK_SELECTORS, 4000);
+  if (hit) {
+    try {
+      await hit.loc.click({ timeout: 8000 });
+      return true;
+    } catch {
+      // fall through to JS click
+    }
+  }
+  // Direct JS invocation (most reliable; avoids pointer-event checks)
+  return page.evaluate(() => {
+    const a =
+      document.querySelector("#secure_imprimer") ||
+      [...document.querySelectorAll("a.ui-menuitem-link")].find((el) =>
+        (el.textContent || "").trim().startsWith("IMPRIMER"),
+      );
+    if (!a) return false;
+    a.removeAttribute("hidden");
+    a.style.removeProperty("display");
+    a.click();
+    return true;
+  });
+};
+
+/**
+ * Poll ~/Downloads for a new PDF that was not in `knownFiles` at the time
+ * the snapshot was taken.  Copies it to `targetPath` and removes the
+ * original.  Returns true when a valid file is saved, false after timeout.
+ *
+ * Rationale: when Playwright is connected via CDP to a user-opened Edge
+ * instance, the browser's download pipe is not managed by Playwright, so
+ * the 'download' event is never emitted.  The file still lands in the OS
+ * Downloads directory however.
+ */
+const waitForNewPdfInDownloads = async (knownFiles, targetPath, onLog) => {
+  const downloadsDir = path.join(os.homedir(), "Downloads");
+  const deadline = Date.now() + 35000; // 35 s window
+
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 900));
+
+    let files;
+    try {
+      files = await fs.readdir(downloadsDir);
+    } catch {
+      continue;
+    }
+
+    const newPdfs = files.filter(
+      (f) =>
+        !knownFiles.has(f) &&
+        f.toLowerCase().endsWith(".pdf") &&
+        !f.toLowerCase().endsWith(".crdownload"),
+    );
+
+    for (const filename of newPdfs) {
+      const srcPath = path.join(downloadsDir, filename);
+      // Confirm download is complete (file size stable over ~1 s)
+      const stat1 = await fs.stat(srcPath).catch(() => null);
+      if (!stat1 || stat1.size < 1024) continue;
+      await new Promise((r) => setTimeout(r, 1000));
+      const stat2 = await fs.stat(srcPath).catch(() => null);
+      if (!stat2 || stat2.size !== stat1.size) continue;
+
+      onLog("debug", `✓ New PDF detected in Downloads folder: ${filename}`);
+      await fs.ensureDir(path.dirname(targetPath));
+      await fs.copy(srcPath, targetPath, { overwrite: true });
+      await fs.remove(srcPath).catch(() => {});
+      return true;
+    }
+  }
+  return false;
+};
+
 const printAndSave = async (conn, targetPath, onLog) => {
   const page = conn.page;
   await fs.ensureDir(path.dirname(targetPath));
 
   await ensureNoBadrInternalError(conn, onLog, "print start");
 
-  onLog("debug", "Waiting for IMPRIMER button to be clickable...");
+  onLog("debug", "Waiting for IMPRIMER button to be ready...");
 
-  // Extra wait to ensure button is fully rendered and responsive
+  // ── Phase 0: clear the blocking overlay BEFORE registering any download
+  // listener.  The overlay can take 60-90 s to disappear after signing; if
+  // the download promise were started now it would expire while we wait.
   await page.waitForTimeout(1200);
+  await waitForNoBlockingOverlay(page, Math.min(config.timeout, 90000));
+  onLog("debug", "✓ Overlay cleared – starting print attempts");
 
+  const downloadsDir = path.join(os.homedir(), "Downloads");
   let lastError = "";
 
   for (let attempt = 1; attempt <= PRINT_ATTEMPTS; attempt++) {
     await ensureNoBadrInternalError(conn, onLog, `print attempt ${attempt}`);
 
-    // Start waiting for the download before clicking IMPRIMER.
-    const downloadPromise = page
-      .waitForEvent("download", {
-        timeout: Math.min(config.timeout, PRINT_DOWNLOAD_TIMEOUT_MS),
-      })
-      .catch(() => null);
+    // Re-show the button – BADR hides it in its own onclick handler after
+    // every click, so each retry needs to un-hide it first.
+    await unhideImprimerButton(page);
+
+    // Fresh Downloads snapshot per attempt so we only detect files that
+    // appear AFTER this particular click.
+    const downloadsSnapshot = new Set(
+      await fs.readdir(downloadsDir).catch(() => []),
+    );
+
+    // Start Downloads-folder monitor concurrently.  In CDP-connected mode
+    // Playwright may not emit 'download' events; the file still lands in the
+    // user's OS Downloads directory, so we poll for it in parallel.
+    const downloadsCheckPromise = waitForNewPdfInDownloads(
+      downloadsSnapshot,
+      targetPath,
+      onLog,
+    );
+
+    // Register Playwright event listeners NOW – overlay is clear, click is
+    // imminent, so the 90-s window will not expire before the file arrives.
+    const downloadPromise = Promise.race([
+      page
+        .waitForEvent("download", { timeout: PRINT_DOWNLOAD_TIMEOUT_MS })
+        .catch(() => null),
+      conn.context
+        .waitForEvent("download", { timeout: PRINT_DOWNLOAD_TIMEOUT_MS })
+        .catch(() => null),
+    ]);
 
     onLog(
       "debug",
       `Attempting to click IMPRIMER (attempt ${attempt}/${PRINT_ATTEMPTS})...`,
     );
 
-    const imprimerClicked = await clickImprimer(page);
+    // clickImprimerDirect does NOT call waitForNoBlockingOverlay again;
+    // the overlay is already clear at this point.
+    const imprimerClicked = await clickImprimerDirect(page);
     if (!imprimerClicked) {
       lastError = "Could not click IMPRIMER";
       onLog("warn", `${lastError} on attempt ${attempt}`);
@@ -1157,40 +1269,63 @@ const printAndSave = async (conn, targetPath, onLog) => {
     onLog("debug", "✓ IMPRIMER clicked");
     onLog("debug", "Waiting for PDF download...");
 
+    // Wait for the Playwright event (up to 90 s).
     const download = await downloadPromise;
-    if (!download) {
-      lastError = "No PDF download event captured after IMPRIMER";
-      onLog("warn", `${lastError} (attempt ${attempt})`);
-      await page.waitForTimeout(1200);
-      continue;
-    }
 
-    const tempPath = `${targetPath}.part`;
-    await fs.remove(tempPath).catch(() => null);
+    if (download) {
+      // ── Playwright captured the download event ──────────────────────────
+      const tempPath = `${targetPath}.part`;
+      await fs.remove(tempPath).catch(() => null);
+      await download.saveAs(tempPath);
+      await ensureNoBadrInternalError(conn, onLog, "print saveAs done");
+      await fs.move(tempPath, targetPath, { overwrite: true });
 
-    await download.saveAs(tempPath);
-    await ensureNoBadrInternalError(conn, onLog, "print saveAs done");
+      const pdfCheck = await verifyPdfSaved(targetPath);
+      if (!pdfCheck.ok) {
+        lastError = pdfCheck.reason;
+        onLog("warn", `Printed file invalid (attempt ${attempt})`, {
+          reason: pdfCheck.reason,
+        });
+        await fs.remove(targetPath).catch(() => null);
+        await page.waitForTimeout(800);
+        continue;
+      }
 
-    await fs.move(tempPath, targetPath, { overwrite: true });
-
-    const pdfCheck = await verifyPdfSaved(targetPath);
-    if (!pdfCheck.ok) {
-      lastError = pdfCheck.reason;
-      onLog("warn", `Printed file invalid (attempt ${attempt})`, {
-        reason: pdfCheck.reason,
+      await ensureNoBadrInternalError(conn, onLog, "print done");
+      onLog("info", "✓ PDF SAVED", {
+        filename: path.basename(targetPath),
+        fullPath: targetPath,
+        size: pdfCheck.size,
       });
-      await fs.remove(targetPath).catch(() => null);
-      await page.waitForTimeout(800);
-      continue;
+      return;
     }
 
-    await ensureNoBadrInternalError(conn, onLog, "print done");
-    onLog("info", "✓ PDF SAVED", {
-      filename: path.basename(targetPath),
-      fullPath: targetPath,
-      size: pdfCheck.size,
-    });
-    return;
+    // ── Playwright event not received – check the Downloads folder
+    // (already polling in background since before the click).
+    onLog(
+      "debug",
+      "Playwright download event not captured – awaiting Downloads folder check...",
+    );
+    const foundInDownloads = await downloadsCheckPromise;
+    if (foundInDownloads) {
+      const pdfCheck = await verifyPdfSaved(targetPath);
+      if (pdfCheck.ok) {
+        await ensureNoBadrInternalError(conn, onLog, "print done (downloads)");
+        onLog("info", "✓ PDF SAVED (via Downloads folder fallback)", {
+          filename: path.basename(targetPath),
+          fullPath: targetPath,
+          size: pdfCheck.size,
+        });
+        return;
+      }
+      lastError = "Downloaded file failed validation";
+    } else {
+      lastError =
+        "No PDF captured after IMPRIMER (Playwright event + Downloads folder both empty)";
+    }
+
+    onLog("warn", `${lastError} (attempt ${attempt})`);
+    await page.waitForTimeout(1200);
   }
 
   throw new Error(

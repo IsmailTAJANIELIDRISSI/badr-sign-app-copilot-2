@@ -106,6 +106,10 @@
 
 1. ✅ **~~FIXED~~ Declaration load wait in fillDeclarationSearch** — Replaced `waitForNavigation + fixed 2500ms` with active DOM polling for declaration tab indicators. (`server/automation.js`)
 
+   _Updated 2026-04-16:_ Further strengthened with 3-phase spinner-aware wait using `waitFor({state:'hidden'})` + full `config.timeout` polling cap.
+
+2. ✅ **~~FIXED~~ IMPRIMER print failure ("No PDF download event captured")** — Root cause: 60-s download-promise timeout raced against `waitForNoBlockingOverlay` (which can take 67+ s). Fixed by: moving overlay-clear call before the download listener loop, adding `clickImprimerDirect` (no internal overlay wait), raising timeout to 90 s, and adding `waitForNewPdfInDownloads` fallback that monitors `~/Downloads` for the PDF in CDP mode. (`server/automation.js`)
+
 2. **Fix live progress counter** — Increment `job.progress.done` (and success/failed/skipped sub-counts) inside the `onLog` callback in `server/index.js` after each DUM result is pushed. This requires either emitting a structured progress event or tracking incrementally.
 
 3. **Add DUM range selector to UI** — Add two number inputs per LTA card (`From DUM` / `To DUM`). Pass them in the `POST /api/jobs/run` body. Filter `lta.dums` in `runSigningJob()` before iterating.
