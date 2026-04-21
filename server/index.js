@@ -61,6 +61,25 @@ app.get("/api/config", (_req, res) => {
 
 app.get("/api/lta-files", async (_req, res) => {
   const parsed = await scanDumFiles();
+
+  // Auto-persist Excel H1 shipper names to JSON for any LTA not yet saved by the user.
+  if (parsed.some((item) => item.shipperName)) {
+    const shippers = await loadShippers();
+    let dirty = false;
+    for (const item of parsed) {
+      if (!item.shipperName) continue;
+      const alreadySaved =
+        shippers.byLtaRef[item.ltaRef] ||
+        shippers.byFileName[item.fileName];
+      if (!alreadySaved) {
+        shippers.byLtaRef[item.ltaRef] = item.shipperName;
+        shippers.byFileName[item.fileName] = item.shipperName;
+        dirty = true;
+      }
+    }
+    if (dirty) await saveShippers(shippers);
+  }
+
   res.json(
     parsed.map((item) => ({
       fileName: item.fileName,
@@ -70,6 +89,7 @@ app.get("/api/lta-files", async (_req, res) => {
       totalDums: item.totalDums,
       validDums: item.validDums,
       invalidDums: item.invalidDums,
+      shipperName: item.shipperName || "",
       dums: item.dums,
     })),
   );

@@ -43,8 +43,12 @@ function App() {
         const resolved = {};
 
         for (const item of data) {
+          // Priority: user-saved JSON value > Excel H1 value > empty
           const value =
-            byLtaRef[item.ltaRef] || byFileName[item.fileName] || "";
+            byLtaRef[item.ltaRef] ||
+            byFileName[item.fileName] ||
+            item.shipperName ||
+            "";
           if (value) resolved[item.fileName] = value;
         }
 

@@ -1,3 +1,7 @@
 {"level":30,"time":1774474707384,"pid":34768,"hostname":"DESKTOP-676D3GL","port":3001,"msg":"API listening"}
 {"level":30,"time":1774475249290,"pid":5628,"hostname":"DESKTOP-676D3GL","port":3001,"msg":"API listening"}
 {"level":30,"time":1774484293619,"pid":48516,"hostname":"DESKTOP-676D3GL","msg":"API listening on http://localhost:3001 | Dums folder: C:\\medafrica-solutions\\badr-sign-app-2\\dums"}
+{"level":30,"time":1776765905307,"pid":26048,"hostname":"DESKTOP-676D3GL","msg":"API listening on http://localhost:3001 | Dums folder: C:\\medafrica-solutions\\badr-sign-app-2\\dums"}
+{"level":30,"time":1776765916582,"pid":26048,"hostname":"DESKTOP-676D3GL","fileName":"generated_excel - 235-97483816.xlsx","ltaRef":"235-97483816","shipperName":"JIANGSU MINQIAN TECHNOLOGY CO., .","msg":"Saved shipper name"}
+{"level":30,"time":1776765916582,"pid":26048,"hostname":"DESKTOP-676D3GL","fileName":"generated_excel - 235-97483816.xlsx","ltaRef":"235-97483816","shipperName":"JIANGSU MINQIAN TECHNOLOGY CO., ..","msg":"Saved shipper name"}
+{"level":30,"time":1776765946830,"pid":13256,"hostname":"DESKTOP-676D3GL","msg":"API listening on http://localhost:3001 | Dums folder: C:\\medafrica-solutions\\badr-sign-app-2\\dums"}

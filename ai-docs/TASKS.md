@@ -2,6 +2,13 @@
 
 ---
 
+## Recently Completed
+
+### ✅ Auto-detect shipper name from Excel H1 (2026-04-21)
+Cell `H1` of each generated Excel now provides the shipper name. The app reads it on scan, pre-fills the UI input, and auto-persists to `.shippers.json` (without overwriting user overrides). See PROGRESS.md for details.
+
+---
+
 ## Currently Incomplete or Broken
 
 ### 1. UI: No DUM Range Filtering
@@ -110,13 +117,13 @@
 
 2. ✅ **~~FIXED~~ IMPRIMER print failure ("No PDF download event captured")** — Root cause: 60-s download-promise timeout raced against `waitForNoBlockingOverlay` (which can take 67+ s). Fixed by: moving overlay-clear call before the download listener loop, adding `clickImprimerDirect` (no internal overlay wait), raising timeout to 90 s, and adding `waitForNewPdfInDownloads` fallback that monitors `~/Downloads` for the PDF in CDP mode. (`server/automation.js`)
 
-2. **Fix live progress counter** — Increment `job.progress.done` (and success/failed/skipped sub-counts) inside the `onLog` callback in `server/index.js` after each DUM result is pushed. This requires either emitting a structured progress event or tracking incrementally.
+3. **Fix live progress counter** — Increment `job.progress.done` (and success/failed/skipped sub-counts) inside the `onLog` callback in `server/index.js` after each DUM result is pushed. This requires either emitting a structured progress event or tracking incrementally.
 
-3. **Add DUM range selector to UI** — Add two number inputs per LTA card (`From DUM` / `To DUM`). Pass them in the `POST /api/jobs/run` body. Filter `lta.dums` in `runSigningJob()` before iterating.
+4. **Add DUM range selector to UI** — Add two number inputs per LTA card (`From DUM` / `To DUM`). Pass them in the `POST /api/jobs/run` body. Filter `lta.dums` in `runSigningJob()` before iterating.
 
-4. **Fix Electron `open-folder` IPC** — Replace `execSync` with `shell.openPath(folderPath)` in `electron/main.js`.
+5. **Fix Electron `open-folder` IPC** — Replace `execSync` with `shell.openPath(folderPath)` in `electron/main.js`.
 
-5. **Create `.env.example`** — Document all env vars with safe placeholder values so new developers have a complete template.
+6. **Create `.env.example`** — Document all env vars with safe placeholder values so new developers have a complete template.
 
 ### Medium Priority (UX Improvements)
 

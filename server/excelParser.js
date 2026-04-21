@@ -24,6 +24,11 @@ const splitSeries = (rawSeries) => {
   return { raw: cleaned, serie: core, key };
 };
 
+const extractShipperName = (sheet) => {
+  // Shipper name is always stored in cell H1 of the generated Excel.
+  return getCell(sheet, "H", 1);
+};
+
 const extractLtaRef = (sheet) => {
   const range = xlsx.utils.decode_range(sheet["!ref"] || "A1:H200");
   for (let r = range.s.r; r <= Math.min(range.e.r, 60); r += 1) {
@@ -135,6 +140,7 @@ export const parseLtaExcel = (filePath) => {
   const sheet = workbook.Sheets[firstSheetName];
 
   const ltaRef = extractLtaRef(sheet);
+  const shipperName = extractShipperName(sheet);
   const byFixedRows = extractDumsByFixedRows(sheet);
   const byLabels = extractDumsByLabels(sheet);
 
@@ -161,6 +167,7 @@ export const parseLtaExcel = (filePath) => {
     fileName: path.basename(filePath),
     ltaRef,
     ltaNumericRef: ltaRef.replace(/-/g, ""),
+    shipperName,
     dums,
     totalDums: dums.length,
     validDums,
