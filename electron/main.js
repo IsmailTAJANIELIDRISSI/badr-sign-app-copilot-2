@@ -53,6 +53,13 @@ const gitPull = async () => {
 
   const cwd = path.join(__dirname, "..");
 
+  // Skip if no .git directory (e.g. app copied without git history).
+  const gitDir = path.join(cwd, ".git");
+  if (!fs.existsSync(gitDir)) {
+    console.log("[GIT] No .git directory found — skipping auto-pull");
+    return;
+  }
+
   // 1. Stash local tracked changes (gitignored files are left untouched).
   const stash = await runGit(["stash", "--include-untracked"], cwd);
   const stashed =
@@ -61,8 +68,10 @@ const gitPull = async () => {
     console.warn(
       `[GIT] stash failed (code=${stash.code}) — skipping pull to avoid data loss`,
     );
-    if (stash.stderr) console.warn(`[GIT] stash stderr: ${stash.stderr.trim()}`);
-    if (stash.stdout) console.warn(`[GIT] stash stdout: ${stash.stdout.trim()}`);
+    if (stash.stderr)
+      console.warn(`[GIT] stash stderr: ${stash.stderr.trim()}`);
+    if (stash.stdout)
+      console.warn(`[GIT] stash stdout: ${stash.stdout.trim()}`);
     return;
   }
   if (stashed) {
