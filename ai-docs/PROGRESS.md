@@ -14,8 +14,6 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
-
-
 **What changed:** The shipper name (Nom ou raison sociale of the exporter) is always stored in cell `H1` of each generated LTA Excel file. Previously the user had to type it manually into the UI input for every LTA. Now the app reads `H1` on scan and pre-fills the shipper input automatically.
 
 **Logic:**

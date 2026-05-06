@@ -61,6 +61,8 @@ const gitPull = async () => {
     console.warn(
       `[GIT] stash failed (code=${stash.code}) — skipping pull to avoid data loss`,
     );
+    if (stash.stderr) console.warn(`[GIT] stash stderr: ${stash.stderr.trim()}`);
+    if (stash.stdout) console.warn(`[GIT] stash stdout: ${stash.stdout.trim()}`);
     return;
   }
   if (stashed) {
