@@ -4,11 +4,22 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
-## 2026-04-21 — Feature: Auto-detect shipper name from Excel H1
+## 2026-05-06 — Fix: Shipper update always fails when name exceeds BADR maxlength=50
+
+**Problem:** The BADR shipper input (`nomOperateurExpediteur`) has `maxlength="50"`. When the expected shipper name was longer than 50 chars (e.g. `XIAMEN JINGAO HAIKONG UNION SUPPLY CHAIN MANAGEMENTCO.,LTD` = 58 chars), Playwright's `fill()` respected the browser's `maxlength` and stored only the first 50 chars. The post-fill verification then compared the original 58-char expected against the 50-char stored value → always a mismatch → every DUM for that LTA failed with `Could not update BADR shipper field`.
+
+**Solution:** In `checkShipper`, after locating the field, read the `maxlength` attribute via `.evaluate((el) => el.maxLength)` (fallback 50). Compute `effectiveExpected = expectedShipper.slice(0, maxLen)`. Use `effectiveExpected` for: (a) initial comparison (covers the case where BADR already has the truncated value), (b) the `fill()` call, (c) the post-fill verification. Original `expectedShipper` is preserved in logs and return values for traceability.
+
+**Files changed:** `server/automation.js` — `checkShipper()`.
+
+---
+
+
 
 **What changed:** The shipper name (Nom ou raison sociale of the exporter) is always stored in cell `H1` of each generated LTA Excel file. Previously the user had to type it manually into the UI input for every LTA. Now the app reads `H1` on scan and pre-fills the shipper input automatically.
 
 **Logic:**
+
 1. `extractShipperName(sheet)` reads cell `H1` via the existing `getCell()` helper.
 2. `parseLtaExcel` returns a new `shipperName` field alongside `ltaRef` and `dums`.
 3. `/api/lta-files` exposes `shipperName` in each item and auto-persists it to `.shippers.json` (only when no user-saved value already exists for that LTA — user overrides are never overwritten).
@@ -17,6 +28,7 @@ _Populated as we work. Each entry = problem + solution + files changed._
 **Files changed:** `server/excelParser.js`, `server/index.js`, `src/App.jsx`.
 
 ---
+
 ## 2026-04-09 — Fix: Declaration form not fully loaded before shipper check
 
 **Problem:** After clicking Valider on the "Modifier une déclaration" search form, BADR loads the full declaration via a PrimeFaces AJAX partial update — not a full page navigation. The previous code did `waitForNavigation (3s)` + `waitForTimeout(2500ms)`, which is unreliable: `waitForNavigation` never fires for AJAX updates, and 2500ms wasn't enough for slower BADR responses. Result: `checkShipper` ran while the page was still loading, found no shipper field after 6 retries, and marked the DUM as failed with `Shipper mismatch. expected='...' actual=''`.

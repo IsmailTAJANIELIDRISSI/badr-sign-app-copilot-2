@@ -4,7 +4,11 @@
 
 ## Recently Completed
 
+### ✅ Shipper update fails when name > 50 chars (BADR maxlength) (2026-05-06)
+`checkShipper` now reads the field's `maxlength` and truncates `expectedShipper` before filling and verification. See PROGRESS.md for details.
+
 ### ✅ Auto-detect shipper name from Excel H1 (2026-04-21)
+
 Cell `H1` of each generated Excel now provides the shipper name. The app reads it on scan, pre-fills the UI input, and auto-persists to `.shippers.json` (without overwriting user overrides). See PROGRESS.md for details.
 
 ---

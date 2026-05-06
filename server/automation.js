@@ -110,6 +110,20 @@ const normalizeShipperLoose = (value) =>
     .replace(/\s+/g, " ")
     .trim();
 
+/**
+ * Truncate a shipper name to fit within BADR's maxlength.
+ * Cuts at the last word boundary (space) before the limit so no word
+ * is split mid-character (e.g. "MANAGEMEN" → "MANAGEMENT" is avoided).
+ * Falls back to a hard slice only when no space exists within the limit.
+ */
+const truncateShipperToMaxLen = (value, maxLen) => {
+  const s = normalize(value);
+  if (s.length <= maxLen) return s;
+  const cut = s.slice(0, maxLen);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut).trimEnd();
+};
+
 const shipperBaseTokens = (value) =>
   normalizeShipperLoose(value)
     .split(" ")
@@ -713,11 +727,22 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
   const actual = await hit.loc.inputValue().catch(async () => {
     return hit.loc.evaluate((el) => el.value || el.getAttribute("value") || "");
   });
-  const ok = isShipperEquivalent(expectedShipper, actual);
+
+  // Respect the BADR field's maxlength: truncate expectedShipper to the limit
+  // the browser enforces so comparisons and fills stay consistent.
+  // Truncation is done at the last word boundary so no word is cut mid-character.
+  const maxLen = await hit.loc
+    .evaluate((el) => (el.maxLength > 0 ? el.maxLength : 50))
+    .catch(() => 50);
+  const effectiveExpected = truncateShipperToMaxLen(expectedShipper, maxLen);
+
+  const ok =
+    isShipperEquivalent(effectiveExpected, actual) ||
+    isShipperEquivalent(expectedShipper, actual);
 
   if (ok) {
     const strictEqual =
-      toUpperCompact(actual) === toUpperCompact(expectedShipper);
+      toUpperCompact(actual) === toUpperCompact(effectiveExpected);
     onLog(
       "debug",
       strictEqual
@@ -730,7 +755,7 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
 
   onLog(
     "warn",
-    `✗ Shipper mismatch - expected: '${expectedShipper}' actual: '${actual}'. Updating BADR field...`,
+    `✗ Shipper mismatch - expected: '${effectiveExpected}' actual: '${actual}'. Updating BADR field...`,
   );
 
   const isDisabled = await hit.loc.isDisabled().catch(() => false);
@@ -743,14 +768,17 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
   }
 
   await hit.loc.fill("");
-  await hit.loc.fill(expectedShipper);
+  await hit.loc.fill(effectiveExpected);
   await conn.page.waitForTimeout(300);
 
   const after = await hit.loc.inputValue().catch(() => "");
-  const updatedOk = isShipperEquivalent(expectedShipper, after);
+  const updatedOk = isShipperEquivalent(effectiveExpected, after);
 
   if (updatedOk) {
-    onLog("info", "✓ BADR shipper field updated to expected value");
+    onLog(
+      "info",
+      `✓ BADR shipper field updated: '${after}'${effectiveExpected !== normalize(expectedShipper) ? ` (truncated to ${maxLen} chars)` : ""}`,
+    );
     await ensureNoBadrInternalError(conn, onLog, "check shipper updated");
     return {
       ok: true,
@@ -763,7 +791,7 @@ const checkShipper = async (conn, expectedShipper, onLog) => {
 
   onLog(
     "error",
-    `✗ Could not update BADR shipper field. expected='${expectedShipper}' after='${after}'`,
+    `✗ Could not update BADR shipper field. expected='${effectiveExpected}' after='${after}'`,
   );
   return { ok: false, actual, expected: expectedShipper, updated: true, after };
 };
