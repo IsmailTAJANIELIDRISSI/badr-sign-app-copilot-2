@@ -1489,42 +1489,13 @@ const reprintBySerieRef = async (
 ) => {
   const page = conn.page;
 
-  onLog("debug", "Recovery: opening DEDOUANEMENT menu for reprint...");
-  const openedMenu = await clickFirst(page, [
-    "h3.ui-panelmenu-header:has-text('DEDOUANEMENT')",
-    "h3:has-text('DEDOUANEMENT')",
-    ".ui-panelmenu-header a:has-text('DEDOUANEMENT')",
-  ]);
-  if (!openedMenu)
-    throw new Error("Recovery: could not open DEDOUANEMENT menu");
+  // Re-use the same proven DEDOUANEMENT → "Modifier une déclaration" navigation
+  // that the main signing flow uses, then fill the form with the definitive
+  // serie/key and go straight to IMPRIMER — no re-signing needed.
+  onLog("debug", "Reprint: opening Modifier une déclaration...");
+  await openModifyDeclaration(conn, onLog);
 
-  await page.waitForTimeout(600);
-
-  onLog("debug", "Recovery: clicking Services...");
-  const clickedServices = await clickFirst(page, [
-    "a:has-text('Services')",
-    "span.ui-menuitem-text:has-text('Services')",
-    "li.ui-menuitem a[title*='Services']",
-  ]);
-  if (!clickedServices)
-    throw new Error("Recovery: could not click Services menu item");
-
-  await page.waitForTimeout(600);
-
-  onLog("debug", "Recovery: clicking Rechercher par référence...");
-  const clickedSearch = await clickFirst(page, [
-    "a:has-text('Rechercher par r\u00e9f\u00e9rence')",
-    "span.ui-menuitem-text:has-text('Rechercher par r\u00e9f\u00e9rence')",
-    "a:has-text('Rechercher par reference')",
-    "a[title*='Rechercher par r']",
-  ]);
-  if (!clickedSearch)
-    throw new Error("Recovery: could not click 'Rechercher par référence'");
-
-  await page.waitForTimeout(1200);
-  await ensureNoBadrInternalError(conn, onLog, "recovery: rechercher par ref");
-
-  onLog("debug", "Recovery: filling search form...", {
+  onLog("debug", "Reprint: filling search form...", {
     bureau,
     regime,
     year,
@@ -1537,41 +1508,45 @@ const reprintBySerieRef = async (
     ["#rootForm\\:_bureauId", "input[id$=':_bureauId']"],
     bureau || config.badr.bureauCode,
   );
-  if (!okBureau) throw new Error("Recovery: could not fill Bureau");
+  if (!okBureau) throw new Error("Reprint: could not fill Bureau");
+
   const okRegime = await fillFirst(
     page,
     ["#rootForm\\:_regimeId", "input[id$=':_regimeId']"],
     regime || config.badr.regimeCode,
   );
-  if (!okRegime) throw new Error("Recovery: could not fill Regime");
+  if (!okRegime) throw new Error("Reprint: could not fill Regime");
+
   const okYear = await fillFirst(
     page,
     ["#rootForm\\:_anneeId", "input[id$=':_anneeId']"],
     year || config.badr.year,
   );
-  if (!okYear) throw new Error("Recovery: could not fill Year");
+  if (!okYear) throw new Error("Reprint: could not fill Year");
+
   const okSerie = await fillFirst(
     page,
     ["#rootForm\\:_serieId", "input[id$=':_serieId']"],
     serie,
   );
-  if (!okSerie) throw new Error("Recovery: could not fill Serie");
+  if (!okSerie) throw new Error("Reprint: could not fill Serie");
+
   const okKey = await fillFirst(
     page,
     ["#rootForm\\:_cleId", "input[id$=':_cleId']"],
     key,
   );
-  if (!okKey) throw new Error("Recovery: could not fill Key");
+  if (!okKey) throw new Error("Reprint: could not fill Key");
 
-  onLog("debug", "Recovery: clicking Valider...");
+  onLog("debug", "Reprint: clicking Valider...");
   const clicked = await clickFirst(page, [
     "#rootForm\\:btnConfirmer",
     "button[id$=':btnConfirmer']",
     "button:has-text('Valider')",
   ]);
-  if (!clicked) throw new Error("Recovery: could not click Valider");
+  if (!clicked) throw new Error("Reprint: could not click Valider");
 
-  // Wait for declaration to load (same pattern as fillDeclarationSearch).
+  // Wait for the declaration to load (same pattern as fillDeclarationSearch).
   const DECLARATION_LOADED_SELECTORS = [
     "a[href='#mainTab:tab0']",
     "input[id$=':nomOperateurExpediteur']",
@@ -1585,7 +1560,7 @@ const reprintBySerieRef = async (
     await ensureNoBadrInternalError(
       conn,
       onLog,
-      "recovery: wait for declaration",
+      "reprint: wait for declaration",
     );
     const hit = await firstPresent(page, DECLARATION_LOADED_SELECTORS);
     if (hit) {
@@ -1595,17 +1570,17 @@ const reprintBySerieRef = async (
     await page.waitForTimeout(400);
   }
   if (!loaded)
-    throw new Error("Recovery: declaration did not load after Valider");
+    throw new Error("Reprint: declaration did not load after Valider");
   await page.waitForTimeout(600);
 
-  onLog("debug", "Recovery: printing declaration...");
+  onLog("debug", "Reprint: printing declaration...");
   await printAndSave(conn, pdfPath, onLog);
 
   const check = await verifyPdfSaved(pdfPath);
   if (!check.ok)
-    throw new Error(`Recovery: PDF verification failed — ${check.reason}`);
+    throw new Error(`Reprint: PDF verification failed — ${check.reason}`);
 
-  onLog("info", `✓ Recovery reprint saved: ${path.basename(pdfPath)}`);
+  onLog("info", `✓ Reprint saved: ${path.basename(pdfPath)}`);
 };
 
 export const runSigningJob = async ({
