@@ -1641,6 +1641,11 @@ export const runSigningJob = async ({
 
     await fs.ensureDir(ltaFolder);
     const ltaLogPath = path.join(ltaFolder, `${lta.ltaRef}.log`);
+    const csvPath = path.join(ltaFolder, "signed_series.csv");
+
+    // Load any existing signed-series CSV so we can fast-path already-signed DUMs
+    // without hitting BADR at all (avoids the "enregistrée" error entirely).
+    let signedSeriesMap = await loadSignedSeriesCsv(csvPath);
 
     const emit = (level, message, meta = {}) => {
       onLog(level, message, meta);
@@ -1689,6 +1694,47 @@ export const runSigningJob = async ({
           `↷ SKIPPED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef} already signed`,
           { outputPdf: pdfPath },
         );
+        results.push(result);
+        continue;
+      }
+
+      // CSV pre-check: DUM was signed in a previous session (CSV entry exists)
+      // but PDF is missing → reprint directly, skip the sign flow entirely.
+      const csvEntry = signedSeriesMap.get(dum.dumNumber);
+      if (csvEntry) {
+        emit(
+          "info",
+          `↷ CSV MATCH - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}: already signed (${csvEntry.serie}${csvEntry.key}), reprinting directly...`,
+          { serie: csvEntry.serie, key: csvEntry.key },
+        );
+        try {
+          await conn.navigateToAccueil();
+          await reprintBySerieRef(
+            conn,
+            {
+              bureau: config.badr.bureauCode,
+              regime: config.badr.regimeCode,
+              year: config.badr.year,
+              ...csvEntry,
+            },
+            pdfPath,
+            emit,
+          );
+          result.status = "success";
+          result.reason = "Reprinted from CSV (signed in previous session)";
+          emit(
+            "info",
+            `✓ SUCCESS (reprint) - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}`,
+            { outputPdf: pdfPath },
+          );
+        } catch (reprintErr) {
+          result.status = "failed";
+          result.reason = `Reprint from CSV failed: ${reprintErr.message}`;
+          emit(
+            "error",
+            `✗ FAILED (reprint) - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}: ${reprintErr.message}`,
+          );
+        }
         results.push(result);
         continue;
       }
@@ -1743,13 +1789,14 @@ export const runSigningJob = async ({
             try {
               const defRef = await extractDefinitiveRef(conn.page);
               if (defRef) {
-                const csvPath = path.join(ltaFolder, "signed_series.csv");
                 await appendSignedSerieCsv(
                   csvPath,
                   dum.dumNumber,
                   defRef,
                   lta.ltaRef,
                 );
+                // Refresh in-memory map so later DUMs in the same run can fast-path.
+                signedSeriesMap = await loadSignedSeriesCsv(csvPath);
                 result.definitiveRef = `${defRef.serie}${defRef.key}`;
                 emit(
                   "debug",
@@ -1860,7 +1907,7 @@ export const runSigningJob = async ({
       (r) => r.ltaRef === lta.ltaRef && r.status === "already_signed",
     );
     if (alreadySignedResults.length > 0) {
-      const csvPath = path.join(ltaFolder, "signed_series.csv");
+      // Reload CSV — may have new entries written during this run.
       const seriesMap = await loadSignedSeriesCsv(csvPath);
 
       emit(
