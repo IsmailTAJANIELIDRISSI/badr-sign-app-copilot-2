@@ -11,6 +11,8 @@ const BADR_INTERNAL_ERROR_HINTS = [
   "COMMUNIQUER LA REFERENCE SUIVANTE A VOTRE SUPPORT",
 ];
 const BADR_INTERNAL_ERROR_PREFIX = "BADR_INTERNAL_ERROR";
+// Thrown when BADR says the declaration is "enregistrée" (already definitively signed).
+const ALREADY_SIGNED_PREFIX = "BADR_ALREADY_SIGNED";
 const SHIPPER_LEGAL_NOISE = new Set([
   "CO",
   "COMPANY",
@@ -245,6 +247,79 @@ const ensureNoBadrInternalError = async (conn, onLog, stage = "") => {
 
 const isBadrInternalError = (error) =>
   String(error?.message || "").includes(BADR_INTERNAL_ERROR_PREFIX);
+
+const isAlreadySignedError = (error) =>
+  String(error?.message || "").includes(ALREADY_SIGNED_PREFIX);
+
+/**
+ * Extract the definitive reference from the declaration header table.
+ * Returns { bureau, regime, year, serie, key } or null if not found.
+ * The table has two rows: headers then values.
+ */
+const extractDefinitiveRef = async (page) => {
+  const contexts = contextsFor(page);
+  const tableSelectors = [
+    "table.reference",
+    "table[id*='j_id_3p_d']",
+    "#mainTab\\:form0\\:j_id_3p_d",
+  ];
+  for (const ctx of contexts) {
+    for (const sel of tableSelectors) {
+      try {
+        const table = ctx.locator(sel).first();
+        if (!(await table.isVisible({ timeout: 800 }).catch(() => false)))
+          continue;
+        const cells = await table.locator("tbody tr:nth-child(2) td").all();
+        if (cells.length < 5) continue;
+        const vals = await Promise.all(
+          cells.slice(0, 5).map((c) => c.innerText().catch(() => "")),
+        );
+        const [bureau, regime, year, serie, key] = vals.map((v) =>
+          v.trim().replace(/^0+/, ""),
+        );
+        if (serie && key) return { bureau, regime, year, serie, key };
+      } catch {
+        // try next
+      }
+    }
+  }
+  return null;
+};
+
+/**
+ * Append a signed-series record to the LTA CSV traceability file.
+ * Format: dumNumber,serie,key,ltaRef,timestamp
+ */
+const appendSignedSerieCsv = async (
+  csvPath,
+  dumNumber,
+  definitiveRef,
+  ltaRef,
+) => {
+  const header = "dumNumber,serie,key,ltaRef,timestamp\n";
+  const line = `${dumNumber},${definitiveRef.serie},${definitiveRef.key},${ltaRef},${new Date().toISOString()}\n`;
+  const exists = await fs.pathExists(csvPath);
+  if (!exists) await fs.outputFile(csvPath, header + line);
+  else await fs.appendFile(csvPath, line);
+};
+
+/**
+ * Read the signed_series.csv for an LTA folder and return a Map:
+ *   dumNumber (Number) → { serie, key }
+ */
+const loadSignedSeriesCsv = async (csvPath) => {
+  const map = new Map();
+  if (!(await fs.pathExists(csvPath))) return map;
+  const text = await fs.readFile(csvPath, "utf8");
+  for (const line of text.split("\n").slice(1)) {
+    const parts = line.trim().split(",");
+    if (parts.length < 3) continue;
+    const [dumNum, serie, key] = parts;
+    const n = Number(dumNum);
+    if (n && serie && key) map.set(n, { serie, key });
+  }
+  return map;
+};
 
 const recoverFromBadrInternalError = async (conn, onLog) => {
   const page = conn.page;
@@ -683,6 +758,46 @@ const fillDeclarationSearch = async (conn, dum, onLog) => {
 
   // Brief stabilisation pause for dynamic fields to finish rendering.
   await page.waitForTimeout(600);
+
+  // ── "Already Signed" detection ─────────────────────────────────────────────
+  // When a declaration was already definitively registered (enregistrée),
+  // BADR shows an error banner containing "enregistrée" and asks for the
+  // definitive reference.  This is NOT a BADR internal error — we handle it
+  // separately so the caller can switch to the recovery print flow.
+  const alreadySignedSelectors = [
+    "#rapportMsg .ui-messages-error",
+    "#form1\\:messages .ui-messages-error",
+    ".ui-messages-error",
+  ];
+  for (const sel of alreadySignedSelectors) {
+    const contexts = contextsFor(page);
+    for (const ctx of contexts) {
+      try {
+        const el = ctx.locator(sel).first();
+        if (!(await el.isVisible({ timeout: 600 }).catch(() => false)))
+          continue;
+        const text = normalize(
+          await el.innerText().catch(() => ""),
+        ).toUpperCase();
+        if (
+          text.includes("ENREGISTR") ||
+          text.includes("R\u00C9F\u00C9RENCE D\u00C9FINITIVE") ||
+          text.includes("REFERENCE DEFINITIVE")
+        ) {
+          onLog(
+            "warn",
+            "BADR reports declaration is already definitively registered — skipping to reprint flow",
+            { errorText: text.slice(0, 200) },
+          );
+          throw new Error(`${ALREADY_SIGNED_PREFIX}:${text.slice(0, 200)}`);
+        }
+      } catch (e) {
+        if (isAlreadySignedError(e)) throw e;
+        // other inspection errors — ignore and continue
+      }
+    }
+  }
+
   await ensureNoBadrInternalError(conn, onLog, "fill declaration search done");
 };
 
@@ -1361,6 +1476,138 @@ const printAndSave = async (conn, targetPath, onLog) => {
   );
 };
 
+/**
+ * Recovery flow: navigate to DEDOUANEMENT → Services → Rechercher par référence,
+ * fill the definitive serie/key, load the declaration, then IMPRIMER → save PDF.
+ * Used when a DUM was already signed (ALREADY_SIGNED) but PDF was never saved.
+ */
+const reprintBySerieRef = async (
+  conn,
+  { bureau, regime, year, serie, key },
+  pdfPath,
+  onLog,
+) => {
+  const page = conn.page;
+
+  onLog("debug", "Recovery: opening DEDOUANEMENT menu for reprint...");
+  const openedMenu = await clickFirst(page, [
+    "h3.ui-panelmenu-header:has-text('DEDOUANEMENT')",
+    "h3:has-text('DEDOUANEMENT')",
+    ".ui-panelmenu-header a:has-text('DEDOUANEMENT')",
+  ]);
+  if (!openedMenu)
+    throw new Error("Recovery: could not open DEDOUANEMENT menu");
+
+  await page.waitForTimeout(600);
+
+  onLog("debug", "Recovery: clicking Services...");
+  const clickedServices = await clickFirst(page, [
+    "a:has-text('Services')",
+    "span.ui-menuitem-text:has-text('Services')",
+    "li.ui-menuitem a[title*='Services']",
+  ]);
+  if (!clickedServices)
+    throw new Error("Recovery: could not click Services menu item");
+
+  await page.waitForTimeout(600);
+
+  onLog("debug", "Recovery: clicking Rechercher par référence...");
+  const clickedSearch = await clickFirst(page, [
+    "a:has-text('Rechercher par r\u00e9f\u00e9rence')",
+    "span.ui-menuitem-text:has-text('Rechercher par r\u00e9f\u00e9rence')",
+    "a:has-text('Rechercher par reference')",
+    "a[title*='Rechercher par r']",
+  ]);
+  if (!clickedSearch)
+    throw new Error("Recovery: could not click 'Rechercher par référence'");
+
+  await page.waitForTimeout(1200);
+  await ensureNoBadrInternalError(conn, onLog, "recovery: rechercher par ref");
+
+  onLog("debug", "Recovery: filling search form...", {
+    bureau,
+    regime,
+    year,
+    serie,
+    key,
+  });
+
+  const okBureau = await fillFirst(
+    page,
+    ["#rootForm\\:_bureauId", "input[id$=':_bureauId']"],
+    bureau || config.badr.bureauCode,
+  );
+  if (!okBureau) throw new Error("Recovery: could not fill Bureau");
+  const okRegime = await fillFirst(
+    page,
+    ["#rootForm\\:_regimeId", "input[id$=':_regimeId']"],
+    regime || config.badr.regimeCode,
+  );
+  if (!okRegime) throw new Error("Recovery: could not fill Regime");
+  const okYear = await fillFirst(
+    page,
+    ["#rootForm\\:_anneeId", "input[id$=':_anneeId']"],
+    year || config.badr.year,
+  );
+  if (!okYear) throw new Error("Recovery: could not fill Year");
+  const okSerie = await fillFirst(
+    page,
+    ["#rootForm\\:_serieId", "input[id$=':_serieId']"],
+    serie,
+  );
+  if (!okSerie) throw new Error("Recovery: could not fill Serie");
+  const okKey = await fillFirst(
+    page,
+    ["#rootForm\\:_cleId", "input[id$=':_cleId']"],
+    key,
+  );
+  if (!okKey) throw new Error("Recovery: could not fill Key");
+
+  onLog("debug", "Recovery: clicking Valider...");
+  const clicked = await clickFirst(page, [
+    "#rootForm\\:btnConfirmer",
+    "button[id$=':btnConfirmer']",
+    "button:has-text('Valider')",
+  ]);
+  if (!clicked) throw new Error("Recovery: could not click Valider");
+
+  // Wait for declaration to load (same pattern as fillDeclarationSearch).
+  const DECLARATION_LOADED_SELECTORS = [
+    "a[href='#mainTab:tab0']",
+    "input[id$=':nomOperateurExpediteur']",
+    "#mainTab",
+    "a[href='#mainTab:tab7']",
+  ];
+  const maxWaitMs = config.timeout;
+  const loadStart = Date.now();
+  let loaded = false;
+  while (Date.now() - loadStart < maxWaitMs) {
+    await ensureNoBadrInternalError(
+      conn,
+      onLog,
+      "recovery: wait for declaration",
+    );
+    const hit = await firstPresent(page, DECLARATION_LOADED_SELECTORS);
+    if (hit) {
+      loaded = true;
+      break;
+    }
+    await page.waitForTimeout(400);
+  }
+  if (!loaded)
+    throw new Error("Recovery: declaration did not load after Valider");
+  await page.waitForTimeout(600);
+
+  onLog("debug", "Recovery: printing declaration...");
+  await printAndSave(conn, pdfPath, onLog);
+
+  const check = await verifyPdfSaved(pdfPath);
+  if (!check.ok)
+    throw new Error(`Recovery: PDF verification failed — ${check.reason}`);
+
+  onLog("info", `✓ Recovery reprint saved: ${path.basename(pdfPath)}`);
+};
+
 export const runSigningJob = async ({
   parsedLtas,
   shipperByFileName,
@@ -1492,6 +1739,37 @@ export const runSigningJob = async ({
             await clickSecondValidate(conn, emit);
             await signDeclaration(conn, emit);
 
+            // ── Extract definitive reference and persist to CSV ──────────────
+            try {
+              const defRef = await extractDefinitiveRef(conn.page);
+              if (defRef) {
+                const csvPath = path.join(ltaFolder, "signed_series.csv");
+                await appendSignedSerieCsv(
+                  csvPath,
+                  dum.dumNumber,
+                  defRef,
+                  lta.ltaRef,
+                );
+                result.definitiveRef = `${defRef.serie}${defRef.key}`;
+                emit(
+                  "debug",
+                  `✓ Definitive ref recorded: ${result.definitiveRef}`,
+                  {
+                    csvPath,
+                  },
+                );
+              } else {
+                emit(
+                  "warn",
+                  "Could not extract definitive reference from header table",
+                );
+              }
+            } catch (csvErr) {
+              emit("warn", "Failed to record definitive ref in CSV", {
+                error: csvErr.message,
+              });
+            }
+
             await printAndSave(conn, pdfPath, emit);
 
             const finalPdfCheck = await verifyPdfSaved(pdfPath);
@@ -1513,6 +1791,9 @@ export const runSigningJob = async ({
             done = true;
             break;
           } catch (attemptError) {
+            // If the declaration is already signed, don't retry — propagate immediately.
+            if (isAlreadySignedError(attemptError)) throw attemptError;
+
             if (
               isBadrInternalError(attemptError) &&
               attempt < maxInternalErrorRetries
@@ -1542,6 +1823,18 @@ export const runSigningJob = async ({
       } catch (error) {
         result.reason = error.message;
 
+        if (isAlreadySignedError(error)) {
+          result.status = "already_signed";
+          result.reason = "Declaration already definitively registered on BADR";
+          emit(
+            "warn",
+            `⚑ ALREADY SIGNED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef} — will attempt recovery reprint`,
+            { outputPdf: pdfPath },
+          );
+          results.push(result);
+          continue;
+        }
+
         if (isBadrInternalError(error)) {
           result.reason =
             "BADR internal error persisted after automatic refresh/retries";
@@ -1558,6 +1851,82 @@ export const runSigningJob = async ({
       }
 
       results.push(result);
+    }
+
+    // ── Recovery reprint pass ──────────────────────────────────────────────
+    // For DUMs marked "already_signed" (declaration was signed but PDF never
+    // saved), try to reprint them using the signed_series.csv.
+    const alreadySignedResults = results.filter(
+      (r) => r.ltaRef === lta.ltaRef && r.status === "already_signed",
+    );
+    if (alreadySignedResults.length > 0) {
+      const csvPath = path.join(ltaFolder, "signed_series.csv");
+      const seriesMap = await loadSignedSeriesCsv(csvPath);
+
+      emit(
+        "info",
+        `Recovery: attempting reprint for ${alreadySignedResults.length} already-signed DUM(s)...`,
+        { csvPath },
+      );
+
+      for (const res of alreadySignedResults) {
+        const pdfPath = res.outputPdf;
+        if (await fs.pathExists(pdfPath)) {
+          res.status = "skipped";
+          res.reason = "Already signed — PDF found on disk";
+          emit(
+            "info",
+            `↷ RECOVERY SKIPPED - DUM ${res.dumNumber}: PDF already exists`,
+          );
+          continue;
+        }
+
+        const refEntry = seriesMap.get(res.dumNumber);
+        if (!refEntry) {
+          emit(
+            "warn",
+            `Recovery: no signed serie found in CSV for DUM ${res.dumNumber} — cannot reprint`,
+            { csvPath },
+          );
+          res.status = "failed";
+          res.reason =
+            "Already signed but no definitive serie in CSV — manual reprint needed";
+          continue;
+        }
+
+        try {
+          emit(
+            "info",
+            `Recovery: reprinting DUM ${res.dumNumber} via serie ${refEntry.serie}${refEntry.key}...`,
+          );
+          await conn.navigateToAccueil();
+          await reprintBySerieRef(
+            conn,
+            {
+              bureau: config.badr.bureauCode,
+              regime: config.badr.regimeCode,
+              year: config.badr.year,
+              ...refEntry,
+            },
+            pdfPath,
+            emit,
+          );
+          res.status = "success";
+          res.reason = "Reprinted via recovery flow";
+          emit(
+            "info",
+            `✓ RECOVERY SUCCESS - DUM ${res.dumNumber} LTA N°${lta.ltaRef}`,
+            { outputPdf: pdfPath },
+          );
+        } catch (reprintErr) {
+          res.status = "failed";
+          res.reason = `Recovery reprint failed: ${reprintErr.message}`;
+          emit(
+            "error",
+            `✗ RECOVERY FAILED - DUM ${res.dumNumber}: ${reprintErr.message}`,
+          );
+        }
+      }
     }
 
     const ltaResults = results.filter((r) => r.ltaRef === lta.ltaRef);
