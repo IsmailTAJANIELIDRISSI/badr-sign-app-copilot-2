@@ -1529,25 +1529,54 @@ const reprintBySerieRef = async (
   if (!clickedSearch)
     throw new Error("Reprint: could not click 'Rechercher par référence'");
 
-  // Wait for the form to fully load inside the iframeMenu.
-  // Poll for the Bureau input to be visible (up to 10 s) instead of a fixed sleep.
-  onLog("debug", "Reprint: waiting for search form to load...");
-  const bureauInputSelectors = [
-    "#rootForm\\:_bureauId",
-    "input[id$=':_bureauId']",
-  ];
-  const formLoadStart = Date.now();
-  let formReady = false;
-  while (Date.now() - formLoadStart < 10000) {
+  // "Rechercher par référence" loads the search form in the CENTER content
+  // frame (ded_recherche_reference.xhtml), NOT in iframeMenu.
+  // Wait for that specific frame and use it directly to avoid selector issues.
+  onLog("debug", "Reprint: waiting for reference search frame to load...");
+  let searchCtx = null;
+  const frameWaitStart = Date.now();
+  while (Date.now() - frameWaitStart < 15000) {
     await ensureNoBadrInternalError(conn, onLog, "reprint: wait for form");
-    const hit = await firstVisible(page, bureauInputSelectors, 500);
-    if (hit) {
-      formReady = true;
-      break;
+    // Try all frames for the search form URL
+    for (const f of [page, ...page.frames()]) {
+      try {
+        const url = typeof f.url === "function" ? f.url() : "";
+        const inSearchPage = url.includes("ded_recherche_reference");
+        // Also check if Bureau input is visible (could be AJAX into main page)
+        const bureauVis = await f
+          .locator('input[name="rootForm:_bureauId"]')
+          .isVisible({ timeout: 600 })
+          .catch(() => false);
+        if (bureauVis || inSearchPage) {
+          // Confirm Bureau input really is there before accepting
+          const confirmed = await f
+            .locator('input[name="rootForm:_bureauId"]')
+            .isVisible({ timeout: 1500 })
+            .catch(() => false);
+          if (confirmed) {
+            searchCtx = f;
+            break;
+          }
+        }
+      } catch (_) {
+        // frame may have been detached — continue
+      }
     }
+    if (searchCtx) break;
     await page.waitForTimeout(400);
   }
-  if (!formReady) throw new Error("Reprint: search form did not appear");
+  if (!searchCtx) throw new Error("Reprint: search form did not appear");
+  onLog("debug", "Reprint: ✓ search form ready");
+
+  // Helper: fill a named input inside searchCtx
+  const fillNamed = async (name, value) => {
+    const loc = searchCtx.locator(`input[name="${name}"]`).first();
+    const visible = await loc.isVisible({ timeout: 2000 }).catch(() => false);
+    if (!visible) return false;
+    await loc.fill("");
+    await loc.fill(String(value));
+    return true;
+  };
 
   onLog("debug", "Reprint: filling search form...", {
     bureau,
@@ -1557,74 +1586,63 @@ const reprintBySerieRef = async (
     key,
   });
 
-  const okBureau = await fillFirst(
-    page,
-    bureauInputSelectors,
-    bureau || config.badr.bureauCode,
-  );
-  if (!okBureau) throw new Error("Reprint: could not fill Bureau");
-
-  const okRegime = await fillFirst(
-    page,
-    ["#rootForm\\:_regimeId", "input[id$=':_regimeId']"],
-    regime || config.badr.regimeCode,
-  );
-  if (!okRegime) throw new Error("Reprint: could not fill Regime");
-
-  const okYear = await fillFirst(
-    page,
-    ["#rootForm\\:_anneeId", "input[id$=':_anneeId']"],
-    year || config.badr.year,
-  );
-  if (!okYear) throw new Error("Reprint: could not fill Year");
-
-  const okSerie = await fillFirst(
-    page,
-    ["#rootForm\\:_serieId", "input[id$=':_serieId']"],
-    serie,
-  );
-  if (!okSerie) throw new Error("Reprint: could not fill Serie");
-
-  const okKey = await fillFirst(
-    page,
-    ["#rootForm\\:_cleId", "input[id$=':_cleId']"],
-    key,
-  );
-  if (!okKey) throw new Error("Reprint: could not fill Key");
+  if (
+    !(await fillNamed("rootForm:_bureauId", bureau || config.badr.bureauCode))
+  )
+    throw new Error("Reprint: could not fill Bureau");
+  if (
+    !(await fillNamed("rootForm:_regimeId", regime || config.badr.regimeCode))
+  )
+    throw new Error("Reprint: could not fill Regime");
+  if (!(await fillNamed("rootForm:_anneeId", year || config.badr.year)))
+    throw new Error("Reprint: could not fill Year");
+  if (!(await fillNamed("rootForm:_serieId", serie)))
+    throw new Error("Reprint: could not fill Serie");
+  if (!(await fillNamed("rootForm:_cleId", key)))
+    throw new Error("Reprint: could not fill Key");
 
   // Check "Déclaration enregistrée" checkbox — required for definitive references.
   onLog("debug", "Reprint: checking 'Déclaration enregistrée' checkbox...");
-  const chkHit = await firstPresent(page, [
-    "#rootForm\\:selectcheckbxDecEnreg_input",
-    "input[id$=':selectcheckbxDecEnreg_input']",
-  ]);
-  if (chkHit) {
-    const isChecked = await chkHit.loc.isChecked().catch(() => false);
-    if (!isChecked) {
-      // Click the visible checkbox box div, not the hidden input.
-      const chkBoxHit = await firstVisible(
-        page,
-        ["#rootForm\\:selectcheckbxDecEnreg .ui-chkbox-box", ".ui-chkbox-box"],
-        2000,
+  try {
+    const chkInput = searchCtx
+      .locator('input[name="rootForm:selectcheckbxDecEnreg_input"]')
+      .first();
+    const chkExists = (await chkInput.count().catch(() => 0)) > 0;
+    if (chkExists) {
+      const isChecked = await chkInput.isChecked().catch(() => false);
+      if (!isChecked) {
+        // Click the visible .ui-chkbox-box wrapper (PrimeFaces hides the real input)
+        const chkBox = searchCtx.locator(".ui-chkbox-box").first();
+        await chkBox.click({ force: true });
+        await page.waitForTimeout(300);
+      }
+      onLog("debug", "Reprint: ✓ Déclaration enregistrée checked");
+    } else {
+      onLog(
+        "warn",
+        "Reprint: checkbox 'Déclaration enregistrée' not found — continuing anyway",
       );
-      if (chkBoxHit) await chkBoxHit.loc.click({ force: true });
-      else await chkHit.loc.click({ force: true });
-      await page.waitForTimeout(300);
     }
-    onLog("debug", "Reprint: ✓ Déclaration enregistrée checked");
-  } else {
+  } catch (chkErr) {
     onLog(
       "warn",
-      "Reprint: checkbox 'Déclaration enregistrée' not found — continuing anyway",
+      `Reprint: checkbox check failed (non-critical): ${chkErr.message}`,
     );
   }
 
   onLog("debug", "Reprint: clicking Valider...");
-  const clicked = await clickFirst(page, [
-    "#rootForm\\:btnConfirmer",
-    "button[id$=':btnConfirmer']",
-    "button:has-text('Valider')",
-  ]);
+  const clicked =
+    (await searchCtx
+      .locator('button[id$=":btnConfirmer"], button:has-text("Valider")')
+      .first()
+      .click()
+      .then(() => true)
+      .catch(() => false)) ||
+    (await clickFirst(page, [
+      "#rootForm\\:btnConfirmer",
+      "button[id$=':btnConfirmer']",
+      "button:has-text('Valider')",
+    ]));
   if (!clicked) throw new Error("Reprint: could not click Valider");
 
   // Wait for the declaration to load (same pattern as fillDeclarationSearch).
@@ -2028,6 +2046,74 @@ export const runSigningJob = async ({
             "error",
             `✗ RECOVERY FAILED - DUM ${res.dumNumber}: ${reprintErr.message}`,
           );
+        }
+      }
+    }
+
+    // ── Missing-PDF recovery ─────────────────────────────────────────────────
+    // Any DUM still missing its PDF (regardless of prior status) that has a
+    // CSV entry gets one more reprint attempt before we compute final status.
+    {
+      const ltaResultsSoFar = results.filter((r) => r.ltaRef === lta.ltaRef);
+      const missingChecks = await Promise.all(
+        ltaResultsSoFar.map(async (r) => ({
+          r,
+          missing:
+            r.status !== "skipped" &&
+            r.outputPdf &&
+            !(await fs.pathExists(r.outputPdf)),
+        })),
+      );
+      const stillMissing = missingChecks
+        .filter((x) => x.missing)
+        .map((x) => x.r);
+
+      if (stillMissing.length > 0) {
+        const seriesMap = await loadSignedSeriesCsv(csvPath);
+        emit(
+          "info",
+          `Missing-PDF recovery: ${stillMissing.length} DUM(s) still need PDFs...`,
+        );
+        for (const res of stillMissing) {
+          const refEntry = seriesMap.get(res.dumNumber);
+          if (!refEntry) {
+            emit(
+              "warn",
+              `Missing-PDF recovery: no CSV entry for DUM ${res.dumNumber} — cannot reprint`,
+              { csvPath },
+            );
+            continue;
+          }
+          try {
+            emit(
+              "info",
+              `Missing-PDF recovery: reprinting DUM ${res.dumNumber} (${refEntry.serie}${refEntry.key})...`,
+            );
+            await conn.navigateToAccueil();
+            await reprintBySerieRef(
+              conn,
+              {
+                bureau: config.badr.bureauCode,
+                regime: config.badr.regimeCode,
+                year: config.badr.year,
+                ...refEntry,
+              },
+              res.outputPdf,
+              emit,
+            );
+            res.status = "success";
+            res.reason = "Reprinted via missing-PDF recovery";
+            emit(
+              "info",
+              `✓ MISSING-PDF RECOVERY SUCCESS - DUM ${res.dumNumber} LTA N°${lta.ltaRef}`,
+              { outputPdf: res.outputPdf },
+            );
+          } catch (err) {
+            emit(
+              "error",
+              `✗ MISSING-PDF RECOVERY FAILED - DUM ${res.dumNumber}: ${err.message}`,
+            );
+          }
         }
       }
     }
