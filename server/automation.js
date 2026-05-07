@@ -1520,6 +1520,12 @@ const reprintBySerieRef = async (
   await page.waitForTimeout(1000);
 
   onLog("debug", "Reprint: clicking Rechercher par référence...");
+  // BADR opens the search form via window.open() (URL has is_popup=true).
+  // Register the popup listener BEFORE the click so the event is not missed.
+  const popupPagePromise = conn.context
+    .waitForEvent("page", { timeout: 8000 })
+    .catch(() => null);
+
   const clickedSearch = await clickFirst(page, [
     "a:has-text('Rechercher par r\u00e9f\u00e9rence')",
     "span.ui-menuitem-text:has-text('Rechercher par r\u00e9f\u00e9rence')",
@@ -1529,42 +1535,76 @@ const reprintBySerieRef = async (
   if (!clickedSearch)
     throw new Error("Reprint: could not click 'Rechercher par référence'");
 
-  // "Rechercher par référence" loads the search form in the CENTER content
-  // frame (ded_recherche_reference.xhtml), NOT in iframeMenu.
-  // Wait for that specific frame and use it directly to avoid selector issues.
-  onLog("debug", "Reprint: waiting for reference search frame to load...");
+  onLog(
+    "debug",
+    "Reprint: waiting for reference search popup/frame to load...",
+  );
+
   let searchCtx = null;
-  const frameWaitStart = Date.now();
-  while (Date.now() - frameWaitStart < 15000) {
-    await ensureNoBadrInternalError(conn, onLog, "reprint: wait for form");
-    // Try all frames for the search form URL
-    for (const f of [page, ...page.frames()]) {
-      try {
-        const url = typeof f.url === "function" ? f.url() : "";
-        const inSearchPage = url.includes("ded_recherche_reference");
-        // Also check if Bureau input is visible (could be AJAX into main page)
-        const bureauVis = await f
-          .locator('input[name="rootForm:_bureauId"]')
-          .isVisible({ timeout: 600 })
-          .catch(() => false);
-        if (bureauVis || inSearchPage) {
-          // Confirm Bureau input really is there before accepting
-          const confirmed = await f
-            .locator('input[name="rootForm:_bureauId"]')
-            .isVisible({ timeout: 1500 })
-            .catch(() => false);
-          if (confirmed) {
-            searchCtx = f;
-            break;
-          }
-        }
-      } catch (_) {
-        // frame may have been detached — continue
+  let popupPage = null; // set when the form lives in a popup Page, not a frame
+
+  // Phase 1 – popup window (most common: BADR uses window.open)
+  const maybePopup = await popupPagePromise;
+  if (maybePopup) {
+    onLog("debug", "Reprint: popup window detected, waiting for form...");
+    try {
+      await maybePopup.waitForLoadState("domcontentloaded", { timeout: 8000 });
+      const bureauVis = await maybePopup
+        .locator('input[name="rootForm:_bureauId"]')
+        .isVisible({ timeout: 5000 })
+        .catch(() => false);
+      if (bureauVis) {
+        searchCtx = maybePopup;
+        popupPage = maybePopup;
+        onLog("debug", "Reprint: ✓ search form ready in popup window");
       }
+    } catch (popupErr) {
+      onLog("warn", `Reprint: popup form check failed: ${popupErr.message}`);
     }
-    if (searchCtx) break;
-    await page.waitForTimeout(400);
   }
+
+  // Phase 2 fallback – scan all context pages and their frames
+  if (!searchCtx) {
+    onLog(
+      "debug",
+      "Reprint: scanning all context pages/frames for search form...",
+    );
+    const frameWaitStart = Date.now();
+    while (Date.now() - frameWaitStart < 10000) {
+      await ensureNoBadrInternalError(conn, onLog, "reprint: wait for form");
+      const allCtxPages = conn.context.pages();
+      const candidates = [
+        ...allCtxPages,
+        ...allCtxPages.flatMap((pg) => pg.frames()),
+      ];
+      for (const ctx of candidates) {
+        try {
+          const url = typeof ctx.url === "function" ? ctx.url() : "";
+          const inSearchPage = url.includes("ded_recherche_reference");
+          const bureauVis = await ctx
+            .locator('input[name="rootForm:_bureauId"]')
+            .isVisible({ timeout: 600 })
+            .catch(() => false);
+          if (bureauVis || inSearchPage) {
+            const confirmed = await ctx
+              .locator('input[name="rootForm:_bureauId"]')
+              .isVisible({ timeout: 1500 })
+              .catch(() => false);
+            if (confirmed) {
+              searchCtx = ctx;
+              if (allCtxPages.includes(ctx) && ctx !== page) popupPage = ctx;
+              break;
+            }
+          }
+        } catch (_) {
+          // detached frame/page — ignore
+        }
+      }
+      if (searchCtx) break;
+      await page.waitForTimeout(400);
+    }
+  }
+
   if (!searchCtx) throw new Error("Reprint: search form did not appear");
   onLog("debug", "Reprint: ✓ search form ready");
 
@@ -1645,6 +1685,9 @@ const reprintBySerieRef = async (
     ]));
   if (!clicked) throw new Error("Reprint: could not click Valider");
 
+  // The declaration may load in the popup page or the main page.
+  const activePage = popupPage || page;
+
   // Wait for the declaration to load (same pattern as fillDeclarationSearch).
   const DECLARATION_LOADED_SELECTORS = [
     "a[href='#mainTab:tab0']",
@@ -1661,19 +1704,31 @@ const reprintBySerieRef = async (
       onLog,
       "reprint: wait for declaration",
     );
-    const hit = await firstPresent(page, DECLARATION_LOADED_SELECTORS);
+    const hit = await firstPresent(activePage, DECLARATION_LOADED_SELECTORS);
     if (hit) {
       loaded = true;
       break;
     }
-    await page.waitForTimeout(400);
+    await activePage.waitForTimeout(400);
   }
   if (!loaded)
     throw new Error("Reprint: declaration did not load after Valider");
-  await page.waitForTimeout(600);
+  await activePage.waitForTimeout(600);
 
   onLog("debug", "Reprint: printing declaration...");
-  await printAndSave(conn, pdfPath, onLog);
+  // Temporarily point conn.page at the popup so printAndSave (which uses
+  // conn.page internally) targets the right window.
+  const _origPage = conn.page;
+  if (popupPage) conn.page = popupPage;
+  try {
+    await printAndSave(conn, pdfPath, onLog);
+  } finally {
+    conn.page = _origPage;
+    if (popupPage && !popupPage.isClosed()) {
+      await popupPage.close().catch(() => {});
+      onLog("debug", "Reprint: popup closed");
+    }
+  }
 
   const check = await verifyPdfSaved(pdfPath);
   if (!check.ok)
