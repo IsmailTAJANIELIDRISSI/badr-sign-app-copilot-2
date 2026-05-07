@@ -1489,11 +1489,47 @@ const reprintBySerieRef = async (
 ) => {
   const page = conn.page;
 
-  // Re-use the same proven DEDOUANEMENT → "Modifier une déclaration" navigation
-  // that the main signing flow uses, then fill the form with the definitive
-  // serie/key and go straight to IMPRIMER — no re-signing needed.
-  onLog("debug", "Reprint: opening Modifier une déclaration...");
-  await openModifyDeclaration(conn, onLog);
+  // The definitive reference is only searchable via
+  // DEDOUANEMENT → Services → Rechercher par référence.
+  // ("Modifier une déclaration" only accepts provisional references.)
+  onLog("debug", "Reprint: expanding DEDOUANEMENT menu...");
+  const openedMenu = await clickFirst(page, [
+    "h3.ui-panelmenu-header:has-text('DEDOUANEMENT')",
+    "h3:has-text('DEDOUANEMENT')",
+    ".ui-panelmenu-header a:has-text('DEDOUANEMENT')",
+  ]);
+  if (!openedMenu) throw new Error("Reprint: could not open DEDOUANEMENT menu");
+  // Give the panel time to fully expand before looking for child items.
+  await page.waitForTimeout(1000);
+
+  onLog("debug", "Reprint: clicking Services...");
+  // The Services item is a collapsible sub-panel whose <a> has nested spans.
+  // Use force:true to bypass any interactability check, and a longer timeout.
+  const servicesHit = await firstVisible(
+    page,
+    [
+      "a#_2051",
+      "a.ui-menuitem-link:has-text('Services')",
+      "a:has-text('Services')",
+    ],
+    3000,
+  );
+  if (!servicesHit)
+    throw new Error("Reprint: could not find Services menu item");
+  await servicesHit.loc.click({ force: true });
+  await page.waitForTimeout(1000);
+
+  onLog("debug", "Reprint: clicking Rechercher par référence...");
+  const clickedSearch = await clickFirst(page, [
+    "a:has-text('Rechercher par r\u00e9f\u00e9rence')",
+    "span.ui-menuitem-text:has-text('Rechercher par r\u00e9f\u00e9rence')",
+    "a[title*='Rechercher par r']",
+    "a:has-text('Rechercher par reference')",
+  ]);
+  if (!clickedSearch)
+    throw new Error("Reprint: could not click 'Rechercher par référence'");
+  await page.waitForTimeout(1200);
+  await ensureNoBadrInternalError(conn, onLog, "reprint: rechercher par ref");
 
   onLog("debug", "Reprint: filling search form...", {
     bureau,
