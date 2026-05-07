@@ -1528,8 +1528,26 @@ const reprintBySerieRef = async (
   ]);
   if (!clickedSearch)
     throw new Error("Reprint: could not click 'Rechercher par référence'");
-  await page.waitForTimeout(1200);
-  await ensureNoBadrInternalError(conn, onLog, "reprint: rechercher par ref");
+
+  // Wait for the form to fully load inside the iframeMenu.
+  // Poll for the Bureau input to be visible (up to 10 s) instead of a fixed sleep.
+  onLog("debug", "Reprint: waiting for search form to load...");
+  const bureauInputSelectors = [
+    "#rootForm\\:_bureauId",
+    "input[id$=':_bureauId']",
+  ];
+  const formLoadStart = Date.now();
+  let formReady = false;
+  while (Date.now() - formLoadStart < 10000) {
+    await ensureNoBadrInternalError(conn, onLog, "reprint: wait for form");
+    const hit = await firstVisible(page, bureauInputSelectors, 500);
+    if (hit) {
+      formReady = true;
+      break;
+    }
+    await page.waitForTimeout(400);
+  }
+  if (!formReady) throw new Error("Reprint: search form did not appear");
 
   onLog("debug", "Reprint: filling search form...", {
     bureau,
@@ -1541,7 +1559,7 @@ const reprintBySerieRef = async (
 
   const okBureau = await fillFirst(
     page,
-    ["#rootForm\\:_bureauId", "input[id$=':_bureauId']"],
+    bureauInputSelectors,
     bureau || config.badr.bureauCode,
   );
   if (!okBureau) throw new Error("Reprint: could not fill Bureau");
@@ -1573,6 +1591,33 @@ const reprintBySerieRef = async (
     key,
   );
   if (!okKey) throw new Error("Reprint: could not fill Key");
+
+  // Check "Déclaration enregistrée" checkbox — required for definitive references.
+  onLog("debug", "Reprint: checking 'Déclaration enregistrée' checkbox...");
+  const chkHit = await firstPresent(page, [
+    "#rootForm\\:selectcheckbxDecEnreg_input",
+    "input[id$=':selectcheckbxDecEnreg_input']",
+  ]);
+  if (chkHit) {
+    const isChecked = await chkHit.loc.isChecked().catch(() => false);
+    if (!isChecked) {
+      // Click the visible checkbox box div, not the hidden input.
+      const chkBoxHit = await firstVisible(
+        page,
+        ["#rootForm\\:selectcheckbxDecEnreg .ui-chkbox-box", ".ui-chkbox-box"],
+        2000,
+      );
+      if (chkBoxHit) await chkBoxHit.loc.click({ force: true });
+      else await chkHit.loc.click({ force: true });
+      await page.waitForTimeout(300);
+    }
+    onLog("debug", "Reprint: ✓ Déclaration enregistrée checked");
+  } else {
+    onLog(
+      "warn",
+      "Reprint: checkbox 'Déclaration enregistrée' not found — continuing anyway",
+    );
+  }
 
   onLog("debug", "Reprint: clicking Valider...");
   const clicked = await clickFirst(page, [
