@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ IMPRIMER fails after slow signing (45 s+ BADR loader) (2026-05-11)
+
+`waitForSigningReady` now uses `config.timeout` for the loader-wait phase and an independent 60 s window for IMPRIMER readiness. `printAndSave` waits for IMPRIMER DOM attachment before starting click attempts. See PROGRESS.md for details.
+
 ### ✅ Shipper update fails when name > 50 chars (BADR maxlength) (2026-05-06)
 
 `checkShipper` now reads the field's `maxlength` and truncates `expectedShipper` before filling and verification. See PROGRESS.md for details.

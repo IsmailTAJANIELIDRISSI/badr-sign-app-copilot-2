@@ -4,6 +4,24 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-05-11 — Fix: IMPRIMER fails after slow signing (45 s+ loader)
+
+**Problem:** `waitForSigningReady` had a hard cap of `Math.min(config.timeout, 45000)` = 45 s shared across BOTH the loader-wait phase AND the IMPRIMER-readiness phase. When BADR's signing process took ≥45 s (DUM 11 of LTA 065-46084942), the loader hid at exactly t=45 s, leaving `remainingAfterLoader = 0`. The IMPRIMER stability check immediately exited. `printAndSave` then tried to click `#secure_imprimer` but BADR hadn't yet rebuilt the left-panel menu post-signing, so the element didn't exist in the DOM at all — all 3 JS-click attempts returned `false`.
+
+**Solution — two changes in `server/automation.js`:**
+
+1. **`waitForSigningReady` — split loader vs. IMPRIMER budgets**
+   - Phase 1 (loader wait): uses `config.timeout` (no artificial cap) so 45 s+ signings are handled.
+   - Phase 2 (IMPRIMER readiness): independent 60 s window starting AFTER the loader hides + overlay clears.
+   - The two phases no longer share one shrinking budget.
+
+2. **`printAndSave` — DOM-attached guard before click attempts**
+   After `waitForNoBlockingOverlay`, wait up to 30 s for `#secure_imprimer` (or any IMPRIMER link) to be **attached** to the DOM (`state: 'attached'`). This catches the BADR async menu-rebuild that happens after a long signing. Logs a warning if not found so the JS-fallback still runs.
+
+**Files changed:** `server/automation.js` — `waitForSigningReady()`, `printAndSave()`.
+
+---
+
 ## 2026-06 — Feature: Handle "already signed" DUMs + definitive-ref CSV + recovery reprint
 
 **Problem:** When a DUM was signed in a previous session but the PDF was never saved (app crash, network cut, etc.), relaunching the job caused `fillDeclarationSearch` to receive the BADR error banner "La déclaration est enregistrée, veuillez fournir sa référence définitive". The app treated this as a hard failure, logging `✗ FAILED` and never attempting to retrieve the already-signed PDF.

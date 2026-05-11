@@ -502,15 +502,19 @@ const appendLtaLog = (logPath, level, message, meta = {}) => {
 
 const waitForSigningReady = async (conn, onLog) => {
   const page = conn.page;
-  // Prefer loader lifecycle if present; otherwise fall back to IMPRIMER readiness polling.
-  const maxWaitMs = Math.min(config.timeout, 45000);
+  // Phase 1: loader detection + wait — uses the full config timeout so
+  // long-running signings (45 s+) are not cut short.
+  const loaderDetectWindowMs = 4000;
+  const loaderWaitMs = config.timeout; // e.g. 120 000 ms
+  // Phase 2: after loader clears, independent window to confirm IMPRIMER.
+  const imprimerReadyMs = 60000;
+
   const start = Date.now();
 
+  // ── Phase 1a: detect signing loader ──────────────────────────────────────
   let sawLoading = false;
-  const detectWindowMs = 4000;
-  while (Date.now() - start < detectWindowMs) {
+  while (Date.now() - start < loaderDetectWindowMs) {
     await ensureNoBadrInternalError(conn, onLog, "signing wait bootstrap");
-
     const loading = await firstVisible(page, LOADING_SELECTORS, 120);
     if (loading) {
       sawLoading = true;
@@ -520,25 +524,23 @@ const waitForSigningReady = async (conn, onLog) => {
     await page.waitForTimeout(200);
   }
 
+  // ── Phase 1b: wait for loader to disappear (no shared budget) ────────────
   if (sawLoading) {
-    // Wait until loader disappears first.
-    const loadingHit = await firstVisible(page, LOADING_SELECTORS, 120);
+    const loadingHit = await firstVisible(page, LOADING_SELECTORS, 500);
     if (loadingHit) {
       await loadingHit.loc
-        .waitFor({ state: "hidden", timeout: maxWaitMs })
+        .waitFor({ state: "hidden", timeout: loaderWaitMs })
         .catch(() => {});
       onLog("debug", "✓ Signing loader hidden");
     }
   }
 
-  const remainingAfterLoader = Math.max(0, maxWaitMs - (Date.now() - start));
-  if (remainingAfterLoader > 0) {
-    await waitForNoBlockingOverlay(page, remainingAfterLoader);
-  }
+  // ── Phase 2: wait for overlay then confirm IMPRIMER is in the menu ───────
+  await waitForNoBlockingOverlay(page, 30000);
 
-  // Require IMPRIMER to be stable for 2 checks to avoid stale/early visibility.
   let stableVisibleCount = 0;
-  while (Date.now() - start < maxWaitMs) {
+  const imprimerStart = Date.now();
+  while (Date.now() - imprimerStart < imprimerReadyMs) {
     await ensureNoBadrInternalError(conn, onLog, "signing wait loop");
 
     const loading = await firstVisible(page, LOADING_SELECTORS, 120);
@@ -565,7 +567,7 @@ const waitForSigningReady = async (conn, onLog) => {
 
   onLog(
     "warn",
-    `⚠ Signing readiness wait exceeded ${Math.round(maxWaitMs / 1000)}s; continuing to IMPRIMER retries`,
+    `⚠ Signing readiness wait exceeded ${Math.round(imprimerReadyMs / 1000)}s post-loader; continuing to IMPRIMER retries`,
   );
   return false;
 };
@@ -1356,7 +1358,28 @@ const printAndSave = async (conn, targetPath, onLog) => {
   // the download promise were started now it would expire while we wait.
   await page.waitForTimeout(1200);
   await waitForNoBlockingOverlay(page, Math.min(config.timeout, 90000));
-  onLog("debug", "✓ Overlay cleared – starting print attempts");
+  onLog(
+    "debug",
+    "✓ Overlay cleared – waiting for IMPRIMER to appear in DOM...",
+  );
+
+  // After a long signing, BADR rebuilds the left-panel menu asynchronously.
+  // Wait for #secure_imprimer to be attached to the DOM before starting
+  // click attempts — otherwise all JS evaluate() calls return false.
+  const imprimerAttached = await page
+    .locator('#secure_imprimer, a.ui-menuitem-link:has-text("IMPRIMER")')
+    .first()
+    .waitFor({ state: "attached", timeout: 30000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!imprimerAttached) {
+    onLog(
+      "warn",
+      "IMPRIMER element not found in DOM after 30s — will try JS click anyway",
+    );
+  } else {
+    onLog("debug", "✓ IMPRIMER present in DOM – starting print attempts");
+  }
 
   const downloadsDir = path.join(os.homedir(), "Downloads");
   let lastError = "";
