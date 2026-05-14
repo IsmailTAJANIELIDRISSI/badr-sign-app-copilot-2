@@ -1941,8 +1941,33 @@ export const runSigningJob = async ({
 
             // ── Extract definitive reference and persist to CSV ──────────────
             try {
-              const defRef = await extractDefinitiveRef(conn.page);
+              const originalRef = `${dum.serie}${dum.key}`;
+              let defRef = await extractDefinitiveRef(conn.page);
+
+              // If the header still shows the original (pre-signing) series,
+              // BADR may not have updated the reference yet — wait 2s and retry once.
+              if (defRef && `${defRef.serie}${defRef.key}` === originalRef) {
+                emit(
+                  "debug",
+                  `Definitive ref still matches original (${originalRef}) — re-reading in 2s…`,
+                );
+                await conn.page.waitForTimeout(2000);
+                const recheck = await extractDefinitiveRef(conn.page);
+                if (recheck) defRef = recheck;
+              }
+
               if (defRef) {
+                const defRefStr = `${defRef.serie}${defRef.key}`;
+                const changed = defRefStr !== originalRef;
+                if (changed) {
+                  emit(
+                    "info",
+                    `Serie changed after signing: ${originalRef} → ${defRefStr}`,
+                  );
+                } else {
+                  emit("debug", `Serie unchanged after signing: ${defRefStr}`);
+                }
+
                 await appendSignedSerieCsv(
                   csvPath,
                   dum.dumNumber,
@@ -1951,13 +1976,11 @@ export const runSigningJob = async ({
                 );
                 // Refresh in-memory map so later DUMs in the same run can fast-path.
                 signedSeriesMap = await loadSignedSeriesCsv(csvPath);
-                result.definitiveRef = `${defRef.serie}${defRef.key}`;
+                result.definitiveRef = defRefStr;
                 emit(
                   "debug",
                   `✓ Definitive ref recorded: ${result.definitiveRef}`,
-                  {
-                    csvPath,
-                  },
+                  { csvPath },
                 );
               } else {
                 emit(
