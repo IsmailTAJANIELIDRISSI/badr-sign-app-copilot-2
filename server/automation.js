@@ -506,8 +506,10 @@ const waitForSigningReady = async (conn, onLog) => {
   // long-running signings (45 s+) are not cut short.
   const loaderDetectWindowMs = 4000;
   const loaderWaitMs = config.timeout; // e.g. 120 000 ms
-  // Phase 2: after loader clears, independent window to confirm IMPRIMER.
-  const imprimerReadyMs = 60000;
+  // Phase 2: after loader clears, short window to confirm IMPRIMER is visible.
+  // printAndSave has its own DOM-attachment guard, so this is just a quick
+  // sanity check — the loader disappearing IS the signing-complete signal.
+  const imprimerReadyMs = 6000;
 
   const start = Date.now();
 

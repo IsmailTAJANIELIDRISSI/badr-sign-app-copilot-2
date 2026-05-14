@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ Post-loader wait reduced from 60 s to 6 s (2026-05-14)
+
+Signing loader disappearing = signing complete. `waitForSigningReady` now checks for IMPRIMER for at most 6 s post-loader. `printAndSave` DOM-attachment guard is the safety net.
+
 ### ✅ IMPRIMER fails after slow signing (45 s+ BADR loader) (2026-05-11)
 
 `waitForSigningReady` now uses `config.timeout` for the loader-wait phase and an independent 60 s window for IMPRIMER readiness. `printAndSave` waits for IMPRIMER DOM attachment before starting click attempts. See PROGRESS.md for details.
