@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ DUM skipped on "Could not fill Bureau field" (form not ready) (2026-05-15)
+
+Added `isFormNotReadyError` helper. Inner catch now also retries (with Accueil recovery) when the form fields are not found — same 3-attempt budget as BADR internal errors.
+
 ### ✅ Post-loader wait reduced from 60 s to 6 s (2026-05-14)
 
 Signing loader disappearing = signing complete. `waitForSigningReady` now checks for IMPRIMER for at most 6 s post-loader. `printAndSave` DOM-attachment guard is the safety net.

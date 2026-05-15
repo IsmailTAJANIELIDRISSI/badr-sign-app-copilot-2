@@ -252,6 +252,17 @@ const isAlreadySignedError = (error) =>
   String(error?.message || "").includes(ALREADY_SIGNED_PREFIX);
 
 /**
+ * True when the declaration search form fields were not reachable — typically
+ * because the iframe / PrimeFaces form was not yet rendered when we tried to
+ * fill it.  These errors are transient and the whole DUM flow should be
+ * retried after navigating back to Accueil.
+ */
+const isFormNotReadyError = (error) =>
+  /Could not fill (Bureau|Regime|Year|Serie|Key) field|Could not click Valider button/.test(
+    String(error?.message || ""),
+  );
+
+/**
  * Extract the definitive reference from the declaration header table.
  * Returns { bureau, regime, year, serie, key } or null if not found.
  * The table has two rows: headers then values.
@@ -2018,18 +2029,19 @@ export const runSigningJob = async ({
             // If the declaration is already signed, don't retry — propagate immediately.
             if (isAlreadySignedError(attemptError)) throw attemptError;
 
-            if (
-              isBadrInternalError(attemptError) &&
-              attempt < maxInternalErrorRetries
-            ) {
+            const shouldRetry =
+              (isBadrInternalError(attemptError) ||
+                isFormNotReadyError(attemptError)) &&
+              attempt < maxInternalErrorRetries;
+
+            if (shouldRetry) {
+              const reason = isFormNotReadyError(attemptError)
+                ? "Form not ready (iframe not yet rendered)"
+                : "BADR internal error";
               emit(
                 "warn",
-                `BADR internal error on DUM ${dum.dumNumber}. Recovering and retrying...`,
-                {
-                  attempt,
-                  maxAttempts: maxInternalErrorRetries,
-                  error: attemptError.message,
-                },
+                `${reason} on DUM ${dum.dumNumber} — navigating to Accueil and retrying (attempt ${attempt}/${maxInternalErrorRetries})...`,
+                { error: attemptError.message },
               );
               await recoverFromBadrInternalError(conn, emit);
               continue;
