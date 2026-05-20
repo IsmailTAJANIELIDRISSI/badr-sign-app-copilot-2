@@ -13,6 +13,8 @@ const BADR_INTERNAL_ERROR_HINTS = [
 const BADR_INTERNAL_ERROR_PREFIX = "BADR_INTERNAL_ERROR";
 // Thrown when BADR says the declaration is "enregistrée" (already definitively signed).
 const ALREADY_SIGNED_PREFIX = "BADR_ALREADY_SIGNED";
+// Thrown when the série number is still unchanged after signing — triggers outer retry.
+const SERIE_UNCHANGED_PREFIX = "BADR_SERIE_UNCHANGED";
 const SHIPPER_LEGAL_NOISE = new Set([
   "CO",
   "COMPANY",
@@ -261,6 +263,8 @@ const isFormNotReadyError = (error) =>
   /Could not fill (Bureau|Regime|Year|Serie|Key) field|Could not click Valider button/.test(
     String(error?.message || ""),
   );
+const isSerieUnchangedError = (error) =>
+  String(error?.message || "").includes(SERIE_UNCHANGED_PREFIX);
 
 /**
  * Extract the definitive reference from the declaration header table.
@@ -1951,6 +1955,7 @@ export const runSigningJob = async ({
             await signDeclaration(conn, emit);
 
             // ── Extract definitive reference and persist to CSV ──────────────
+            let serieUnchanged = false;
             try {
               const originalRef = `${dum.serie}${dum.key}`;
               let defRef = await extractDefinitiveRef(conn.page);
@@ -1976,7 +1981,11 @@ export const runSigningJob = async ({
                     `Serie changed after signing: ${originalRef} → ${defRefStr}`,
                   );
                 } else {
-                  emit("debug", `Serie unchanged after signing: ${defRefStr}`);
+                  emit(
+                    "warn",
+                    `Serie unchanged after signing (${defRefStr}) — will retry if attempts remain`,
+                  );
+                  serieUnchanged = true;
                 }
 
                 await appendSignedSerieCsv(
@@ -2005,6 +2014,14 @@ export const runSigningJob = async ({
               });
             }
 
+            // If serie is still unchanged after the 2s re-read, trigger a retry
+            // of the full sign flow (navigate back to Accueil → re-open → re-sign).
+            if (serieUnchanged) {
+              throw new Error(
+                `${SERIE_UNCHANGED_PREFIX}: serie ${dum.serie}${dum.key} unchanged after signing`,
+              );
+            }
+
             await printAndSave(conn, pdfPath, emit);
 
             const finalPdfCheck = await verifyPdfSaved(pdfPath);
@@ -2031,13 +2048,16 @@ export const runSigningJob = async ({
 
             const shouldRetry =
               (isBadrInternalError(attemptError) ||
-                isFormNotReadyError(attemptError)) &&
+                isFormNotReadyError(attemptError) ||
+                isSerieUnchangedError(attemptError)) &&
               attempt < maxInternalErrorRetries;
 
             if (shouldRetry) {
               const reason = isFormNotReadyError(attemptError)
                 ? "Form not ready (iframe not yet rendered)"
-                : "BADR internal error";
+                : isSerieUnchangedError(attemptError)
+                  ? "Serie unchanged after signing"
+                  : "BADR internal error";
               emit(
                 "warn",
                 `${reason} on DUM ${dum.dumNumber} — navigating to Accueil and retrying (attempt ${attempt}/${maxInternalErrorRetries})...`,
