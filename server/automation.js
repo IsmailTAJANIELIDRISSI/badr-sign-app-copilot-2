@@ -13,8 +13,6 @@ const BADR_INTERNAL_ERROR_HINTS = [
 const BADR_INTERNAL_ERROR_PREFIX = "BADR_INTERNAL_ERROR";
 // Thrown when BADR says the declaration is "enregistrée" (already definitively signed).
 const ALREADY_SIGNED_PREFIX = "BADR_ALREADY_SIGNED";
-// Thrown when the série number is still unchanged after signing — triggers outer retry.
-const SERIE_UNCHANGED_PREFIX = "BADR_SERIE_UNCHANGED";
 const SHIPPER_LEGAL_NOISE = new Set([
   "CO",
   "COMPANY",
@@ -263,8 +261,6 @@ const isFormNotReadyError = (error) =>
   /Could not fill (Bureau|Regime|Year|Serie|Key) field|Could not click Valider button/.test(
     String(error?.message || ""),
   );
-const isSerieUnchangedError = (error) =>
-  String(error?.message || "").includes(SERIE_UNCHANGED_PREFIX);
 
 /**
  * Extract the definitive reference from the declaration header table.
@@ -1952,56 +1948,70 @@ export const runSigningJob = async ({
             }
 
             await clickSecondValidate(conn, emit);
-            await signDeclaration(conn, emit);
+            // ── Sign + serie-change inner retry loop ───────────────────────────
+            // BADR has a known UI bug: after signing the serie in the header
+            // does not update and the SIGNER button remains visible.  The fix
+            // is to re-click SIGNER on the same page until the serie changes
+            // (up to MAX_SIGN_ATTEMPTS total clicks).
+            const MAX_SIGN_ATTEMPTS = 3;
+            const originalRef = `${dum.serie}${dum.key}`;
+            let defRef = null;
 
-            // ── Extract definitive reference and persist to CSV ──────────────
-            let serieUnchanged = false;
-            try {
-              const originalRef = `${dum.serie}${dum.key}`;
-              let defRef = await extractDefinitiveRef(conn.page);
-
-              // If the header still shows the original (pre-signing) series,
-              // BADR may not have updated the reference yet — wait 2s and retry once.
-              if (defRef && `${defRef.serie}${defRef.key}` === originalRef) {
+            for (let sa = 1; sa <= MAX_SIGN_ATTEMPTS; sa++) {
+              if (sa > 1) {
                 emit(
-                  "debug",
-                  `Definitive ref still matches original (${originalRef}) — re-reading in 2s…`,
+                  "warn",
+                  `Serie unchanged — re-clicking SIGNER on same page (sign attempt ${sa}/${MAX_SIGN_ATTEMPTS})…`,
                 );
+              }
+
+              await signDeclaration(conn, emit);
+
+              // Give BADR up to 4s to refresh the header reference.
+              defRef = await extractDefinitiveRef(conn.page);
+              if (defRef && `${defRef.serie}${defRef.key}` === originalRef) {
                 await conn.page.waitForTimeout(2000);
                 const recheck = await extractDefinitiveRef(conn.page);
                 if (recheck) defRef = recheck;
               }
 
+              const defRefStr = defRef ? `${defRef.serie}${defRef.key}` : null;
+              if (defRefStr && defRefStr !== originalRef) {
+                emit(
+                  "info",
+                  `Serie changed after signing: ${originalRef} → ${defRefStr}`,
+                );
+                break; // ✅ confirmed
+              }
+
+              if (sa < MAX_SIGN_ATTEMPTS) {
+                emit(
+                  "warn",
+                  `Serie still unchanged (${defRefStr ?? "unreadable"}) after sign attempt ${sa}/${MAX_SIGN_ATTEMPTS}`,
+                );
+              } else {
+                emit(
+                  "warn",
+                  `Serie unchanged after all ${MAX_SIGN_ATTEMPTS} sign attempts — proceeding to print`,
+                );
+              }
+            }
+
+            // ── Persist definitive reference to CSV ───────────────────────────
+            try {
               if (defRef) {
                 const defRefStr = `${defRef.serie}${defRef.key}`;
-                const changed = defRefStr !== originalRef;
-                if (changed) {
-                  emit(
-                    "info",
-                    `Serie changed after signing: ${originalRef} → ${defRefStr}`,
-                  );
-                } else {
-                  emit(
-                    "warn",
-                    `Serie unchanged after signing (${defRefStr}) — will retry if attempts remain`,
-                  );
-                  serieUnchanged = true;
-                }
-
                 await appendSignedSerieCsv(
                   csvPath,
                   dum.dumNumber,
                   defRef,
                   lta.ltaRef,
                 );
-                // Refresh in-memory map so later DUMs in the same run can fast-path.
                 signedSeriesMap = await loadSignedSeriesCsv(csvPath);
                 result.definitiveRef = defRefStr;
-                emit(
-                  "debug",
-                  `✓ Definitive ref recorded: ${result.definitiveRef}`,
-                  { csvPath },
-                );
+                emit("debug", `✓ Definitive ref recorded: ${defRefStr}`, {
+                  csvPath,
+                });
               } else {
                 emit(
                   "warn",
@@ -2012,14 +2022,6 @@ export const runSigningJob = async ({
               emit("warn", "Failed to record definitive ref in CSV", {
                 error: csvErr.message,
               });
-            }
-
-            // If serie is still unchanged after the 2s re-read, trigger a retry
-            // of the full sign flow (navigate back to Accueil → re-open → re-sign).
-            if (serieUnchanged) {
-              throw new Error(
-                `${SERIE_UNCHANGED_PREFIX}: serie ${dum.serie}${dum.key} unchanged after signing`,
-              );
             }
 
             await printAndSave(conn, pdfPath, emit);
@@ -2048,16 +2050,13 @@ export const runSigningJob = async ({
 
             const shouldRetry =
               (isBadrInternalError(attemptError) ||
-                isFormNotReadyError(attemptError) ||
-                isSerieUnchangedError(attemptError)) &&
+                isFormNotReadyError(attemptError)) &&
               attempt < maxInternalErrorRetries;
 
             if (shouldRetry) {
               const reason = isFormNotReadyError(attemptError)
                 ? "Form not ready (iframe not yet rendered)"
-                : isSerieUnchangedError(attemptError)
-                  ? "Serie unchanged after signing"
-                  : "BADR internal error";
+                : "BADR internal error";
               emit(
                 "warn",
                 `${reason} on DUM ${dum.dumNumber} — navigating to Accueil and retrying (attempt ${attempt}/${maxInternalErrorRetries})...`,
