@@ -4,7 +4,25 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
-## 2026-05-15 — Fix: DUM skipped when "Could not fill Bureau field" (form not ready)
+## 2026-05-19 — Feature: LTA Priority Order (drag-to-reorder)
+
+**Problem:** LTAs were processed in the order the filesystem returned them, with no way for the user to choose which LTA runs first.
+
+**Solution:**
+
+- Added `orderedFileNames` state (array of fileNames in user-defined order). On refresh, new files are appended and stale files removed while preserving existing order.
+- Added "Set Priority Order" toggle button. Entering order mode:
+  - Cards switch from a 3-column grid to a vertical list.
+  - Each card shows a numbered amber badge, a braille drag-handle, and Up/Down arrow buttons + Include checkbox.
+  - HTML5 drag-and-drop (`draggable`, `onDragStart/Over/Drop/End`) for mouse users; Up/Down arrows as keyboard-friendly fallback.
+  - Amber highlight ring on the drop target during drag.
+- In normal grid mode: a `#N` pill badge shows each selected LTA's processing position, plus a pill strip below the toolbar previewing the full order.
+- `selectedFileNames` (sent to the API) is now `orderedFileNames.filter(fn => selected[fn])` — preserving priority order.
+- **Backend fix (`server/index.js`):** Changed `parsed.filter(fn => ...)` to `fileNames.map(fn => parsed.find(...)).filter(Boolean)` so the API respects the received order.
+
+**Files changed:** `src/App.jsx`, `server/index.js`.
+
+---
 
 **Problem:** When `fillDeclarationSearch` ran immediately after `openModifyDeclaration` clicked the menu link, the PrimeFaces iframe/form was sometimes not yet rendered. `fillFirst` found no matching element, threw `Could not fill Bureau field`, which was NOT matched by `isBadrInternalError` — so the retry loop re-threw immediately, marking the DUM as `failed` with no CSV entry. The missing-PDF recovery pass could not help (no CSV entry = nothing to reprint). The DUM was never signed.
 

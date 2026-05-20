@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ LTA priority order — drag-to-reorder UI (2026-05-19)
+
+"Set Priority Order" mode: drag-and-drop + arrow buttons. Normal mode shows `#N` position badges and a pill strip. Backend now respects `fileNames` array order.
+
 ### ✅ DUM skipped on "Could not fill Bureau field" (form not ready) (2026-05-15)
 
 Added `isFormNotReadyError` helper. Inner catch now also retries (with Accueil recovery) when the form fields are not found — same 3-attempt budget as BADR internal errors.

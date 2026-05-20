@@ -69,8 +69,7 @@ app.get("/api/lta-files", async (_req, res) => {
     for (const item of parsed) {
       if (!item.shipperName) continue;
       const alreadySaved =
-        shippers.byLtaRef[item.ltaRef] ||
-        shippers.byFileName[item.fileName];
+        shippers.byLtaRef[item.ltaRef] || shippers.byFileName[item.fileName];
       if (!alreadySaved) {
         shippers.byLtaRef[item.ltaRef] = item.shipperName;
         shippers.byFileName[item.fileName] = item.shipperName;
@@ -99,8 +98,11 @@ app.post("/api/jobs/run", async (req, res) => {
   const { shipperByFileName = {}, fileNames = [] } = req.body || {};
 
   const parsed = state.ltaFiles.length ? state.ltaFiles : await scanDumFiles();
+  // Preserve the user-supplied fileNames order (priority order).
   const filtered = fileNames.length
-    ? parsed.filter((item) => fileNames.includes(item.fileName))
+    ? fileNames
+        .map((fn) => parsed.find((item) => item.fileName === fn))
+        .filter(Boolean)
     : parsed;
 
   const jobId = uuidv4();
