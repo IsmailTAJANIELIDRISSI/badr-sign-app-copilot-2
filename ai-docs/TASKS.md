@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ Series regex too strict — short series rejected (2026-05-22)
+
+`SERIES_REGEX` now accepts 4–7 digits (`/^\d{4,7}[A-Z]$/i`). Previously only 7-digit series were valid, causing DUMs like `76945B` to fail with "Invalid series format".
+
 ### ✅ LTA priority order — drag-to-reorder UI (2026-05-19)
 
 "Set Priority Order" mode: drag-and-drop + arrow buttons. Normal mode shows `#N` position badges and a pill strip. Backend now respects `fileNames` array order.

@@ -3,7 +3,7 @@ import xlsx from "xlsx";
 
 const LTA_REGEX = /\b\d{3}-\d{8}\b/;
 const DUM_LABEL_REGEX = /^\s*DUM\s+(\d+)\s*$/i;
-const SERIES_REGEX = /^\d{7}[A-Z]$/i;
+const SERIES_REGEX = /^\d{4,7}[A-Z]$/i;
 
 const normalizeCell = (value) => String(value ?? "").trim();
 

@@ -4,6 +4,16 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-05-22 — Fix: Series format validation too strict
+
+**Problem:** `SERIES_REGEX = /^\d{7}[A-Z]$/i` required exactly 7 digits. Series like `76945B` (5 digits) caused `Invalid series format` and the DUM was skipped entirely.
+
+**Solution:** Relaxed to `/^\d{4,7}[A-Z]$/i` — accepts 4–7 digit prefixes, covers all real-world BADR series lengths.
+
+**Files:** `server/excelParser.js`
+
+---
+
 ## 2026-05-19 — Feature: LTA Priority Order (drag-to-reorder)
 
 **Problem:** LTAs were processed in the order the filesystem returned them, with no way for the user to choose which LTA runs first.
