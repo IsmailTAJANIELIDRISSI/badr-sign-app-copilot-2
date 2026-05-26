@@ -1122,7 +1122,7 @@ const checkPreapLot = async (conn, expectedLot, onLog) => {
     if (attempt < 6) {
       onLog(
         "debug",
-        `Preapurement lot not matched on attempt ${attempt}/6, retrying...`,
+        `Preapurement lot not matched on attempt ${attempt}/6 — expected='${expectedNormalized}' found=[${lotRefs.join(", ") || "none"}], retrying...`,
       );
       await page.waitForTimeout(900 + attempt * 150);
     }
