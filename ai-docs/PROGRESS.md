@@ -4,6 +4,19 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-07 — Fix: LTA-READY email left no trace in the per-LTA log
+
+**Problem:** The notification block runs *after* `fs.move()` renames the LTA folder to `… READY`. The per-LTA log (`{ltaRef}.log`) lives **inside** that folder, and `appendLtaLog` swallows all write errors. So every line emitted after the rename (the READY mark **and** the email attempt) tried to append to the now-missing old path, threw `ENOENT`, and was silently dropped. The log always cut off exactly at `Completed LTA … pdfs=N/N`, making it look like the email code never ran / failed silently.
+
+**Solution (`server/automation.js`):**
+- `ltaLogPath` changed from `const` → `let`; after `fs.move()` it's repointed to `path.join(targetFolder, "{ref}.log")` so post-rename lines land in the renamed folder's log.
+- Email path now logs a reason in **every** branch: disabled (`EMAIL_ENABLED` not true), already-sent (`.email_sent` marker), sending…, sent/failed. No more silent "no email".
+- **Diagnostic tell:** a `.email_sent` marker file is written in the READY folder **only on successful send** — its presence confirms the email went out.
+
+**Files changed:** `server/automation.js`.
+
+---
+
 ## 2026-07-06 — Feature: Email on LTA READY + WhatsApp alerts + per-LTA chrono
 
 **Problem:** When an LTA finished (all DUMs signed → `READY` folder) there was no automatic hand-off — someone had to manually email the signed PDFs to the Medafrica team. There was also no alerting when an LTA landed in `PROBLEM`, when the job crashed, or when a run hung/took abnormally long.
