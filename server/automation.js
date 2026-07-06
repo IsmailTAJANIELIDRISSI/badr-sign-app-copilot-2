@@ -1819,7 +1819,11 @@ export const runSigningJob = async ({
         : normalLtaFolder;
 
     await fs.ensureDir(ltaFolder);
-    const ltaLogPath = path.join(ltaFolder, `${lta.ltaRef}.log`);
+    // `let` (not const): after the folder is renamed to READY/PROBLEM below we
+    // repoint this at the new folder so post-rename lines (READY mark, email /
+    // WhatsApp result) keep landing in the LTA log instead of being silently
+    // dropped by appendLtaLog (which swallows the ENOENT on the old path).
+    let ltaLogPath = path.join(ltaFolder, `${lta.ltaRef}.log`);
     const csvPath = path.join(ltaFolder, "signed_series.csv");
 
     // Load any existing signed-series CSV so we can fast-path already-signed DUMs
@@ -2318,6 +2322,10 @@ export const runSigningJob = async ({
     if (ltaFolder !== targetFolder) {
       if (!(await fs.pathExists(targetFolder))) {
         await fs.move(ltaFolder, targetFolder);
+        // Repoint the per-LTA log at the renamed folder so subsequent lines
+        // (this READY/PROBLEM mark + the email/WhatsApp result) are recorded
+        // instead of being silently dropped on the now-missing old path.
+        ltaLogPath = path.join(targetFolder, `${lta.ltaRef}.log`);
         for (const r of ltaResults) {
           if (r.outputPdf) {
             r.outputPdf = r.outputPdf.replace(ltaFolder, targetFolder);
@@ -2352,13 +2360,28 @@ export const runSigningJob = async ({
     if (isReady) {
       // Send the LTA-READY email once. A marker file guards against re-spamming
       // the recipients when an already-READY LTA is re-run (resume mode).
+      // Every branch logs a reason so "no email" is never silent.
       const emailMarker = path.join(targetFolder, ".email_sent");
-      if (config.email.enabled && !(await fs.pathExists(emailMarker))) {
+      if (!config.email.enabled) {
+        emit(
+          "warn",
+          `📧 Email NOT sent for LTA ${lta.ltaRef}: email disabled (set EMAIL_ENABLED=true and EMAIL_* in .env)`,
+        );
+      } else if (await fs.pathExists(emailMarker)) {
+        emit(
+          "info",
+          `📧 Email already sent for LTA ${lta.ltaRef} previously (.email_sent marker present) — skipping`,
+        );
+      } else {
         const pdfPaths = lta.dums.map((d) =>
           path.join(
             targetFolder,
             `DUM ${d.dumNumber} LTA N°${lta.ltaRef}.pdf`,
           ),
+        );
+        emit(
+          "info",
+          `📧 Sending LTA-READY email for ${lta.ltaRef} (${dumCount} DUM, ${pdfPaths.length} PDF)...`,
         );
         const sent = await sendLtaReadyEmail({
           ltaRef: lta.ltaRef,
@@ -2366,7 +2389,7 @@ export const runSigningJob = async ({
           pdfPaths,
           onLog: emit,
         }).catch((e) => {
-          emit("error", `Email error for LTA ${lta.ltaRef}: ${e.message}`);
+          emit("error", `📧 Email error for LTA ${lta.ltaRef}: ${e.message}`);
           return false;
         });
         if (sent) {
