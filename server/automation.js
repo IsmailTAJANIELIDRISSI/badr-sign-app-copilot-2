@@ -3,6 +3,7 @@ import os from "os";
 import fs from "fs-extra";
 import { config } from "./config.js";
 import { BADRConnection } from "./badrConnection.js";
+import { sendLtaReadyEmail, sendWhatsApp } from "./notifications.js";
 
 const REQUIRED_DOC_HINTS = ["TRANSPORT", "FACTURE"];
 const BADR_INTERNAL_ERROR_HINTS = [
@@ -1783,7 +1784,20 @@ export const runSigningJob = async ({
 
   const results = [];
 
-  for (const lta of parsedLtas) {
+  // Per-LTA "chrono" watchdog timers. Each fires an independent WhatsApp alert
+  // if its LTA is not finished within the expected time (dumCount * min/DUM).
+  // Kept in a job-scoped map so we can clear them on completion / job abort.
+  const chronoTimers = new Map();
+  const clearChrono = (ltaRef) => {
+    const t = chronoTimers.get(ltaRef);
+    if (t) {
+      clearTimeout(t);
+      chronoTimers.delete(ltaRef);
+    }
+  };
+
+  try {
+    for (const lta of parsedLtas) {
     const normalLtaFolder = path.join(
       config.directories.signedLtas,
       `LTA N° ${lta.ltaRef}`,
@@ -1823,6 +1837,32 @@ export const runSigningJob = async ({
       validDums: lta.validDums,
       invalidDums: lta.invalidDums,
     });
+
+    // Start the chrono watchdog for this LTA. Rule: 16 DUMs ≈ 20 min, i.e.
+    // ~1.25 min/DUM. If the LTA is not finished within that window, fire an
+    // independent WhatsApp alert (also covers the process being stopped/hung).
+    {
+      const dumCount = lta.dums.length;
+      const expectedMin = dumCount * config.ltaChrono.minutesPerDum;
+      const chronoMs = Math.max(60_000, Math.round(expectedMin * 60_000));
+      clearChrono(lta.ltaRef);
+      chronoTimers.set(
+        lta.ltaRef,
+        setTimeout(() => {
+          chronoTimers.delete(lta.ltaRef);
+          sendWhatsApp(
+            `⏱️ PROBLEM - LTA ${lta.ltaRef} (${dumCount} DUM) is taking too long: ` +
+              `not finished after ~${Math.round(expectedMin)} min (expected done by then). ` +
+              `The process may be stuck, stopped, or missing DUMs — please check.`,
+            emit,
+          ).catch(() => {});
+        }, chronoMs),
+      );
+      emit(
+        "info",
+        `⏱️ Chrono started for LTA ${lta.ltaRef}: expected finish in ~${Math.round(expectedMin)} min (${dumCount} DUM)`,
+      );
+    }
 
     for (const dum of lta.dums) {
       const pdfName = `DUM ${dum.dumNumber} LTA N°${lta.ltaRef}.pdf`;
@@ -2303,6 +2343,54 @@ export const runSigningJob = async ({
           : `⚠ LTA remains PROBLEM: ${path.basename(targetFolder)}`,
       );
     }
+
+    // ── Notifications ────────────────────────────────────────────────────────
+    // The LTA is done: stop its chrono watchdog and notify.
+    clearChrono(lta.ltaRef);
+    const dumCount = lta.dums.length;
+
+    if (isReady) {
+      // Send the LTA-READY email once. A marker file guards against re-spamming
+      // the recipients when an already-READY LTA is re-run (resume mode).
+      const emailMarker = path.join(targetFolder, ".email_sent");
+      if (config.email.enabled && !(await fs.pathExists(emailMarker))) {
+        const pdfPaths = lta.dums.map((d) =>
+          path.join(
+            targetFolder,
+            `DUM ${d.dumNumber} LTA N°${lta.ltaRef}.pdf`,
+          ),
+        );
+        const sent = await sendLtaReadyEmail({
+          ltaRef: lta.ltaRef,
+          dumCount,
+          pdfPaths,
+          onLog: emit,
+        }).catch((e) => {
+          emit("error", `Email error for LTA ${lta.ltaRef}: ${e.message}`);
+          return false;
+        });
+        if (sent) {
+          await fs
+            .writeFile(emailMarker, new Date().toISOString())
+            .catch(() => {});
+        }
+      }
+    } else {
+      // PROBLEM: missing DUMs / not completed / failures → WhatsApp alert.
+      await sendWhatsApp(
+        `⚠️ PROBLEM - LTA ${lta.ltaRef} (${dumCount} DUM): finished with problems ` +
+          `(success=${ltaSuccess}, failed=${ltaFailed}, pdfs=${existingPdfCount}/${expectedPdfCount}). ` +
+          `Folder marked PROBLEM.`,
+        emit,
+      ).catch((e) =>
+        emit("error", `WhatsApp error for LTA ${lta.ltaRef}: ${e.message}`),
+      );
+    }
+    }
+  } finally {
+    // Clear any still-pending chrono watchdogs (e.g. on job abort / error).
+    for (const t of chronoTimers.values()) clearTimeout(t);
+    chronoTimers.clear();
   }
 
   return results;

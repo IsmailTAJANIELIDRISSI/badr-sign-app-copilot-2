@@ -8,6 +8,7 @@ import { logger } from "./logger.js";
 import { parseLtaExcel } from "./excelParser.js";
 import { createJob, pushJobLog, state } from "./state.js";
 import { runSigningJob } from "./automation.js";
+import { sendWhatsApp } from "./notifications.js";
 
 await fs.ensureDir(config.directories.dums);
 await fs.ensureDir(config.directories.outputs);
@@ -146,6 +147,12 @@ app.post("/api/jobs/run", async (req, res) => {
       pushJobLog(jobId, "error", "Job failed", { error: error.message });
       job.status = "failed";
       job.completedAt = new Date().toISOString();
+      // Notify: the whole signing process errored out / was interrupted.
+      await sendWhatsApp(
+        `❌ PROBLEM - Signing process stopped with an error: ${error.message}. ` +
+          `Please check the app.`,
+        (level, message) => pushJobLog(jobId, level, message),
+      ).catch(() => {});
     }
   })();
 });
@@ -244,3 +251,23 @@ app.listen(config.port, () => {
     `API listening on http://localhost:${config.port} | Dums folder: ${config.directories.dums}`,
   );
 });
+
+// Best-effort: if the process is stopped/killed while a job is still running,
+// fire a WhatsApp alert before we exit. (Only fires on graceful signals; a hard
+// kill -9 cannot be caught. The per-LTA chrono covers hangs while alive.)
+let _shuttingDown = false;
+const notifyOnShutdown = async (signal) => {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  const running = [...state.jobs.values()].some((j) => j.status === "running");
+  if (running) {
+    await sendWhatsApp(
+      `🛑 PROBLEM - Signing process was stopped (${signal}) while a job was still running. ` +
+        `Some LTAs may be incomplete — please check.`,
+      (level, message) => logger.info({ signal }, message),
+    ).catch(() => {});
+  }
+  process.exit(0);
+};
+process.on("SIGINT", () => notifyOnShutdown("SIGINT"));
+process.on("SIGTERM", () => notifyOnShutdown("SIGTERM"));

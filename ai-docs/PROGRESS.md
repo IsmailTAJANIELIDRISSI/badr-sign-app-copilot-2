@@ -4,6 +4,37 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-06 — Feature: Email on LTA READY + WhatsApp alerts + per-LTA chrono
+
+**Problem:** When an LTA finished (all DUMs signed → `READY` folder) there was no automatic hand-off — someone had to manually email the signed PDFs to the Medafrica team. There was also no alerting when an LTA landed in `PROBLEM`, when the job crashed, or when a run hung/took abnormally long.
+
+**Solution — new `server/notifications.js` module + hooks:**
+
+1. **Email on READY (`sendLtaReadyEmail`)** — When an LTA is finalized as READY, send an SMTP email (nodemailer) with:
+   - Subject: `MAWB {ltaRef} ({n} DUM)` — e.g. `MAWB 157-53611950 (15 DUM)`.
+   - Empty body; **all** signed DUM PDFs attached.
+   - Recipients: real Medafrica To/CC lists hardcoded in `config.js` (`DEFAULT_EMAIL_TO` / `DEFAULT_EMAIL_CC`), overridable via `EMAIL_TO` / `EMAIL_CC` env for testing.
+   - Sent once per LTA — guarded by a `.email_sent` marker file in the folder so re-runs of an already-READY LTA don't re-spam.
+   - Trigger point: `runSigningJob()` finalization block in `automation.js` (`isReady === true`).
+
+2. **WhatsApp alerts (`sendWhatsApp`, CallMeBot provider)** fired on:
+   - **PROBLEM folder** — LTA finished with failures / missing PDFs.
+   - **Chrono timeout** — per-LTA watchdog `setTimeout`. Rule: 16 DUMs ≈ 20 min ⇒ `LTA_MINUTES_PER_DUM = 1.25`. Timer = `dumCount × 1.25` min; if the LTA isn't done by then (stuck/stopped/missing DUMs) it fires independently. Timers held in a job-scoped `Map`, cleared on LTA completion and in a `finally` on job abort.
+   - **Job error** — `catch` in `server/index.js` `/api/jobs/run`.
+   - **Process stop** — best-effort `SIGINT`/`SIGTERM` handlers in `index.js` (only if a job is running; hard `kill -9` can't be caught).
+
+3. **Config (`server/config.js`)** — new `email`, `whatsapp`, `ltaChrono` sections + `toBool`/`toFloat`/`toList` helpers. `.env.example` documents all new vars.
+
+**Setup still required by the user:**
+- Create/populate `.env` (none exists in the checkout) with the `EMAIL_*` block.
+- Get a CallMeBot API key (message their WhatsApp number) and set `WHATSAPP_CALLMEBOT_APIKEY`. Until then WhatsApp is gated off and silently skipped.
+
+**Interpretation note:** "LTA finished = all DUMs done + validated series replaced by signed definitive series" is exactly the existing READY condition (`allPdfsExist && ltaFailed === 0`), so the email triggers on READY.
+
+**Files changed:** `server/notifications.js` (new), `server/config.js`, `server/automation.js`, `server/index.js`, `.env.example`, `package.json` (nodemailer dependency).
+
+---
+
 ## 2026-05-22 — Fix: Series format validation too strict
 
 **Problem:** `SERIES_REGEX = /^\d{7}[A-Z]$/i` required exactly 7 digits. Series like `76945B` (5 digits) caused `Invalid series format` and the DUM was skipped entirely.

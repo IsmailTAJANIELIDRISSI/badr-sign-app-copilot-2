@@ -4,6 +4,12 @@
 
 ## Recently Completed
 
+### ✅ Email + WhatsApp notifications + per-LTA chrono (2026-07-06)
+
+New `server/notifications.js`. On LTA **READY** → email (`MAWB {ref} ({n} DUM)`, empty body, all signed PDFs attached) to the Medafrica To/CC lists, sent once per LTA (`.email_sent` marker). WhatsApp (CallMeBot) alerts on **PROBLEM** folders, job errors, process stop (`SIGINT`/`SIGTERM`), and a per-LTA **chrono** watchdog (`LTA_MINUTES_PER_DUM = 1.25`, i.e. 16 DUMs ≈ 20 min). Config in `server/config.js` (`email`, `whatsapp`, `ltaChrono`); vars in `.env.example`. See PROGRESS.md.
+
+**Outstanding user setup:** create `.env` with the `EMAIL_*` values, and obtain + set `WHATSAPP_CALLMEBOT_APIKEY` (WhatsApp is gated off until then).
+
 ### ✅ Series regex too strict — short series rejected (2026-05-22)
 
 `SERIES_REGEX` now accepts 4–7 digits (`/^\d{4,7}[A-Z]$/i`). Previously only 7-digit series were valid, causing DUMs like `76945B` to fail with "Invalid series format".
