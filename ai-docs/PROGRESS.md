@@ -4,6 +4,82 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-21 — Redesign: tabbed app shell, logs moved out of the page bottom
+
+**Problem:** Everything lived on one long scrolling page with the live logs pinned underneath the LTA cards. During a run you had to scroll past every card to watch progress, and the log box was a fixed 420 px window inside a page that itself scrolled — awkward and cramped.
+
+**Solution — `src/App.jsx` rebuilt as a fixed-height app shell (`h-screen flex flex-col`) with two tabs:**
+
+- **LTAs tab** — setup only: search box, select-all/none, priority-order toggle, and a responsive card grid (up to 4 columns on wide screens). Cards show a checkbox + priority `#N`, DUM count, LTA ref, the copyable MAWB subject, and the shipper input. Unselected cards dim to 60 % opacity so the run set is obvious at a glance.
+- **Activity tab** — the log console gets the whole viewport: 5 stat tiles, level filter (all/info/warn/error/debug), a text filter, auto-scroll toggle, "Copy logs", and a `filtered/total` counter. Lines are colour-coded per level with a status dot.
+
+**Details worth keeping:**
+
+- **Live progress derived from the log stream.** The backend only fills `job.progress` *after* the whole job finishes (known issue, TASKS #10), so a naive progress bar would sit at 0 for an entire run. The UI counts `✓ SUCCESS` / `↷ SKIPPED` / `✗ FAILED|ABORTED` lines while running and switches to the authoritative `job.progress` once the job ends. Caveat noted in code: `job.logs` is capped at 1000 entries server-side, so these can undercount on very long runs.
+- **Progress bar + current LTA live in the header**, so they stay visible from either tab.
+- The Activity tab auto-opens when a run starts; it shows a pulsing dot while running and a red failed-count badge afterwards.
+- The card of the LTA currently being signed is highlighted (green ring + `● SIGNING`), parsed from the latest `Processing LTA …` log line.
+- Order mode: fixed-width ↑/↓ buttons (they previously stretched the full row width in the vertical list layout).
+
+**Verified** by running the real app (Vite + API) and screenshotting all three states — LTAs grid, Activity console, and priority-order mode — with live data from `dums/`.
+
+**Files changed:** `src/App.jsx`.
+
+---
+
+## 2026-07-21 — Feature: one-click copyable mail subject
+
+**Problem:** When sending an LTA's PDFs manually, the user had to retype the subject (`MAWB 607-54334361 - (18 DUM)`) by hand every time — tedious and typo-prone.
+
+**Solution — the subject is produced in three places, so it can be copied from wherever the user already is:**
+
+1. **`email_subject.txt`** written into the LTA output folder alongside the PDFs (`server/automation.js`) — the user is usually already in Explorer there.
+2. **Copy button on each LTA card** (`src/App.jsx`): shows the subject in monospace with a `Copy` action that flashes `✓ Copied`. Available immediately, not only after a run, since the subject derives from `ltaRef` + `dumsCount`.
+3. **Logged** (`📋 Mail subject ready to copy: …`) so it's also selectable from the app's log panel.
+
+Clipboard writes try `navigator.clipboard.writeText` first and fall back to a hidden-textarea `execCommand("copy")` — Electron's `file://` origin is not a secure context, so the modern API can be unavailable there.
+
+**Format is duplicated between server and client, so they must be kept in sync** — verified both render byte-identical `MAWB 607-54334361 - (18 DUM)`.
+
+⚠️ Note: this copy text uses `MAWB {ref} - ({n} DUM)` (with a dash), while the **automated** email subject in `notifications.js` uses `MAWB {ref} ({n} DUM)` (no dash), per the original spec. Unify if that discrepancy is unintended.
+
+**Files changed:** `server/automation.js`, `src/App.jsx`.
+
+---
+
+## 2026-07-21 — Feature: desktop screenshot fallback when the browser is gone
+
+**Problem:** The failure email's screenshot comes from the Playwright page, so in the exact case you most want to see — Edge closed/crashed mid-run — it produced `(No screenshot available)`. No visibility into what was actually on screen.
+
+**Solution (`server/notifications.js`):** `captureScreenshot()` now cascades — BADR page first, and if that's impossible, the **whole Windows desktop** (all monitors, virtual-screen bounds).
+
+- Implemented with **PowerShell + .NET `System.Drawing`** (`Graphics.CopyFromScreen`), which ship with Windows. Deliberately **no npm package**: adding a dependency has repeatedly broken other machines that hadn't run `npm install` (see the nodemailer incident), and a screenshot helper must never be able to take the app down.
+- Split into `captureBrowserScreenshot` / `captureDesktopScreenshot`; `captureScreenshot` returns `{ path, source: "browser"|"desktop" }` or `null`.
+- The email labels which one it is ("Desktop at the time of failure (the browser was closed…)") so the reader isn't misled into thinking a desktop shot is the BADR page.
+- Screenshots are named `…-browser-<ts>.png` / `…-desktop-<ts>.png` in `logs/screenshots/`.
+
+**Caveat (documented in code):** desktop capture needs an interactive, unlocked session — a locked workstation or service-mode run yields a black image. If both captures fail the email still sends, saying the session may be locked.
+
+**Verified** on Windows: real 176 KB PNG of the actual desktop in ~1.1 s, `source: "desktop"`, with the browser reported closed.
+
+**Files changed:** `server/notifications.js`.
+
+---
+
+## 2026-07-21 — Fix: chrono counted already-signed DUMs + browser-closed cascade
+
+**Problem 1 — chrono budgeted work that was already done.** The watchdog used `lta.dums.length`, so a resumed run with 12 of 18 DUMs already signed still budgeted ~23 min even though only 6 remained (~8 min of work). The alarm was ~15 min too loose to catch a real stall.
+
+**Fix:** before arming the timer, count DUMs that have **no PDF on disk** (`pendingCount`) and budget `pendingCount × minutesPerDum`. If nothing is pending, the chrono is skipped entirely. Logs now read `⏱️ Chrono started …: expected finish in ~8 min (6 of 18 DUM remaining)`. `setCurrentLta` still records the LTA's **total** DUM count — that identifies the LTA in the email subject, and shouldn't shrink on resume.
+
+**Problem 2 — a closed browser produced a cascade of phantom failures.** When Edge was closed mid-run, Playwright threw `Target page, context or browser has been closed` for every subsequent DUM. The loop ground through all of them in one second, marking DUMs that were **never attempted** as `failed`, then emitted a "no CSV entry" warning per DUM in the recovery passes. Observed twice: 17 phantom failures, then 6.
+
+**Fix:** new `isBrowserClosedError()` (matches "target closed", "browser has been closed/disconnected", "websocket error"). On match the DUM loop records that one DUM as failed, sets `browserClosed`, and **breaks**. That flag also skips both reprint recovery passes (they need a live browser) and breaks the outer LTA loop, so untried DUMs/LTAs stay untouched and resume cleanly on the next run.
+
+**Files changed:** `server/automation.js`.
+
+---
+
 ## 2026-07-21 — Fix: per-machine recipient lists caused recurring git merge conflicts
 
 **Problem:** Different machines need different email recipients (test inbox vs the real Medafrica team). Users were changing them by editing `server/config.js` — a **tracked** file. `electron/main.js` auto-pulls on every startup (`git stash` → `pull` → `stash pop`), so a local edit to `config.js` plus an upstream change to the same file produced a conflicted `stash pop`. That wrote `<<<<<<< Updated upstream` markers into `config.js`, making it invalid JS → the API server crashed on startup → `SyntaxError: Unexpected token '<<'` and a dead backend (`ECONNREFUSED` on every `/api/*` call).

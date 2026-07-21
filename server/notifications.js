@@ -129,31 +129,91 @@ export const resetFailureNotifications = () => {
   _failureNotified.clear();
 };
 
-/**
- * Screenshot whatever the BADR browser is currently showing.
- * Returns the PNG path, or null if no live page (e.g. browser was closed).
- */
-export const captureScreenshot = async (label, onLog = noopLog) => {
+const shotPath = async (label, suffix) => {
+  const shotDir = path.join(config.directories.logs, "screenshots");
+  await fs.ensureDir(shotDir);
+  const safe = String(label || "failure")
+    .replace(/[^a-zA-Z0-9_-]+/g, "_")
+    .slice(0, 60);
+  return path.join(shotDir, `${safe}-${suffix}-${Date.now()}.png`);
+};
+
+/** Screenshot the BADR page. Null if the page/browser is gone. */
+const captureBrowserScreenshot = async (label, onLog) => {
   const page = _activeConn?.page;
   if (!page) return null;
   try {
-    if (typeof page.isClosed === "function" && page.isClosed()) {
-      onLog("warn", "Screenshot skipped: browser page is already closed");
-      return null;
-    }
-    const shotDir = path.join(config.directories.logs, "screenshots");
-    await fs.ensureDir(shotDir);
-    const safe = String(label || "failure")
-      .replace(/[^a-zA-Z0-9_-]+/g, "_")
-      .slice(0, 60);
-    const file = path.join(shotDir, `${safe}-${Date.now()}.png`);
+    if (typeof page.isClosed === "function" && page.isClosed()) return null;
+    const file = await shotPath(label, "browser");
     await page.screenshot({ path: file, timeout: 15000 });
     return file;
-  } catch (err) {
-    // Browser closed / crashed / detached — expected in several failure modes.
-    onLog("warn", `Screenshot unavailable: ${err.message}`);
+  } catch {
+    // Browser closed / crashed / detached — caller falls back to the desktop.
     return null;
   }
+};
+
+/**
+ * Screenshot the whole Windows desktop — the fallback for when the browser is
+ * gone and a page screenshot is impossible, so we can still see what was on
+ * screen (an error dialog, a crash, the closed window, ...).
+ *
+ * Uses PowerShell + .NET System.Drawing, which ship with Windows — deliberately
+ * no npm package, so nothing extra has to be installed on each machine.
+ * Captures the full virtual screen (all monitors).
+ *
+ * Caveat: needs an interactive, unlocked desktop session. A locked workstation
+ * or a service-mode run yields a black image.
+ */
+const captureDesktopScreenshot = async (label, onLog) => {
+  if (process.platform !== "win32") return null;
+  try {
+    const file = await shotPath(label, "desktop");
+    const ps = `
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+$b   = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+$g   = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($b.X, $b.Y, 0, 0, $bmp.Size)
+$bmp.Save(${JSON.stringify(file)}, [System.Drawing.Imaging.ImageFormat]::Png)
+$g.Dispose(); $bmp.Dispose()`;
+
+    const { execFile } = await import("child_process");
+    await new Promise((resolve, reject) => {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", ps],
+        { timeout: 20000, windowsHide: true },
+        (err) => (err ? reject(err) : resolve()),
+      );
+    });
+
+    if (await fs.pathExists(file)) return file;
+    return null;
+  } catch (err) {
+    onLog("warn", `Desktop screenshot failed: ${err.message}`);
+    return null;
+  }
+};
+
+/**
+ * Best available screenshot: the BADR page if the browser is alive, otherwise
+ * the desktop. Returns { path, source: "browser"|"desktop" } or null.
+ */
+export const captureScreenshot = async (label, onLog = noopLog) => {
+  const browserShot = await captureBrowserScreenshot(label, onLog);
+  if (browserShot) return { path: browserShot, source: "browser" };
+
+  onLog(
+    "warn",
+    "Browser screenshot unavailable (page/browser closed) — capturing the desktop instead",
+  );
+  const desktopShot = await captureDesktopScreenshot(label, onLog);
+  if (desktopShot) {
+    onLog("info", "📸 Desktop screenshot captured");
+    return { path: desktopShot, source: "desktop" };
+  }
+  return null;
 };
 
 /**
@@ -169,6 +229,7 @@ export const sendLtaFailedEmail = async ({
   dumCount,
   reason,
   screenshotPath,
+  screenshotSource,
   onLog = noopLog,
 }) => {
   const transporter = await getTransporter(onLog);
@@ -179,14 +240,20 @@ export const sendLtaFailedEmail = async ({
   let html = `<p>${reason || "Signing did not complete."}</p>`;
 
   if (screenshotPath && (await fs.pathExists(screenshotPath))) {
+    const isDesktop = screenshotSource === "desktop";
+    const caption = isDesktop
+      ? "Desktop at the time of failure (the browser was closed, so the BADR page could not be captured):"
+      : "BADR screen at the time of failure:";
     attachments.push({
       filename: path.basename(screenshotPath),
       path: screenshotPath,
       cid: "badrscreen",
     });
-    html += `<p><img src="cid:badrscreen" alt="BADR screen" style="max-width:100%;border:1px solid #ccc"/></p>`;
+    html +=
+      `<p>${caption}</p>` +
+      `<p><img src="cid:badrscreen" alt="${isDesktop ? "Desktop" : "BADR screen"}" style="max-width:100%;border:1px solid #ccc"/></p>`;
   } else {
-    html += `<p><i>(No screenshot available — the browser was closed or unreachable.)</i></p>`;
+    html += `<p><i>(No screenshot available — the browser was closed and the desktop could not be captured either; the session may be locked.)</i></p>`;
   }
 
   try {
@@ -245,7 +312,8 @@ export const notifyLtaFailure = async ({
       ltaRef: ref,
       dumCount: count,
       reason,
-      screenshotPath: shot,
+      screenshotPath: shot?.path,
+      screenshotSource: shot?.source,
       onLog,
     });
   } catch (err) {

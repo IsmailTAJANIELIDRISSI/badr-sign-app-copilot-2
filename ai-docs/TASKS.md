@@ -4,6 +4,22 @@
 
 ## Recently Completed
 
+### ✅ UI redesign — tabbed shell, logs in their own tab (2026-07-21)
+
+`src/App.jsx` rebuilt as a fixed-height shell with **LTAs** (setup) and **Activity** (full-viewport log console with level/text filters, auto-scroll, copy) tabs. Header keeps a live progress bar + current LTA visible from either tab. Live counters are derived from the log stream, which **also works around TASKS #10** (`job.progress.done` only being filled after the job ends) — see the caveat about the 1000-line log cap in PROGRESS.md. Verified against the running app with screenshots.
+
+### ✅ One-click copyable mail subject (2026-07-21)
+
+`MAWB {ref} - ({n} DUM)` is now available three ways: `email_subject.txt` in the LTA output folder, a **Copy** button on each LTA card in the UI, and a `📋` log line. Clipboard falls back to `execCommand` because Electron's `file://` origin isn't a secure context. The string is duplicated in `server/automation.js` and `src/App.jsx` — **keep them in sync**. See PROGRESS.md.
+
+### ✅ Desktop screenshot fallback when the browser is closed (2026-07-21)
+
+`captureScreenshot()` cascades: BADR page → whole Windows desktop → none. Desktop capture uses PowerShell + .NET `System.Drawing` (no npm dependency, so it can't break machines that haven't run `npm install`). The failure email labels which kind it is. Needs an unlocked interactive session; a locked workstation gives a black image. Verified: real desktop PNG in ~1.1 s. See PROGRESS.md.
+
+### ✅ Chrono now budgets only remaining DUMs; browser-closed aborts cleanly (2026-07-21)
+
+Chrono counts DUMs with no PDF on disk, so a resumed run budgets `~8 min (6 of 18 DUM remaining)` instead of a useless `~23 min`; skipped entirely when nothing is pending. A closed browser (`isBrowserClosedError`) now aborts the DUM loop, both recovery passes and the outer LTA loop, instead of instantly marking every untried DUM as `failed`. See PROGRESS.md.
+
 ### ✅ Per-machine recipient lists — no more config.js merge conflicts (2026-07-21)
 
 **Rule: shared/production values → `config.js` (committed). Machine-specific values → `.env` (gitignored). Never edit a tracked file to configure one machine** — `electron/main.js` auto-pulls on startup (stash → pull → stash pop), so local edits to tracked files conflict and leave `<<<<<<<` markers that break the app.

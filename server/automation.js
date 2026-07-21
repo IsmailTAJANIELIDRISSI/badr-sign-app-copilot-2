@@ -20,6 +20,20 @@ const BADR_INTERNAL_ERROR_HINTS = [
   "COMMUNIQUER LA REFERENCE SUIVANTE A VOTRE SUPPORT",
 ];
 const BADR_INTERNAL_ERROR_PREFIX = "BADR_INTERNAL_ERROR";
+// Raised by Playwright once Edge/the page is gone (user closed it, crash, CDP
+// drop). Unrecoverable: every later DUM would fail instantly with the same
+// error, so we abort rather than falsely marking untried DUMs as "failed".
+const BROWSER_CLOSED_HINTS = [
+  "TARGET PAGE, CONTEXT OR BROWSER HAS BEEN CLOSED",
+  "TARGET CLOSED",
+  "BROWSER HAS BEEN CLOSED",
+  "BROWSER HAS DISCONNECTED",
+  "WEBSOCKET ERROR",
+];
+const isBrowserClosedError = (error) => {
+  const text = String(error?.message || "").toUpperCase();
+  return BROWSER_CLOSED_HINTS.some((hint) => text.includes(hint));
+};
 // Thrown when BADR says the declaration is "enregistrée" (already definitively signed).
 const ALREADY_SIGNED_PREFIX = "BADR_ALREADY_SIGNED";
 const SHIPPER_LEGAL_NOISE = new Set([
@@ -1918,37 +1932,72 @@ export const runSigningJob = async ({
     {
       const dumCount = lta.dums.length;
       // Track the in-progress LTA so job-level / process-level failures can
-      // build the "Signature Failed LTA N°{ref} ({n} DUM)" subject.
+      // build the "Signature Failed LTA N°{ref} ({n} DUM)" subject. This stays
+      // the LTA's TOTAL DUM count — it identifies the LTA, not the workload.
       setCurrentLta(lta.ltaRef, dumCount);
-      const expectedMin = dumCount * config.ltaChrono.minutesPerDum;
-      const chronoMs = Math.max(60_000, Math.round(expectedMin * 60_000));
+
+      // Budget only the DUMs that still need signing. On a resumed run the
+      // already-signed ones are skipped in milliseconds, so charging the full
+      // count would give a uselessly loose deadline (e.g. 23 min for 18 DUM
+      // when only 6 remain — a stall would go unreported for ~20 min).
+      const pendingFlags = await Promise.all(
+        lta.dums.map(async (d) =>
+          d.isValid === false
+            ? false
+            : !(await fs.pathExists(
+                path.join(
+                  ltaFolder,
+                  `DUM ${d.dumNumber} LTA N°${lta.ltaRef}.pdf`,
+                ),
+              )),
+        ),
+      );
+      const pendingCount = pendingFlags.filter(Boolean).length;
+
       clearChrono(lta.ltaRef);
-      chronoTimers.set(
-        lta.ltaRef,
-        setTimeout(() => {
-          chronoTimers.delete(lta.ltaRef);
-          sendWhatsApp(
-            `⏱️ PROBLEM - LTA ${lta.ltaRef} (${dumCount} DUM) is taking too long: ` +
-              `not finished after ~${Math.round(expectedMin)} min (expected done by then). ` +
-              `The process may be stuck, stopped, or missing DUMs — please check.`,
-            emit,
-          ).catch(() => {});
-          // Also email the failure with a screenshot of the current screen.
-          notifyLtaFailure({
-            ltaRef: lta.ltaRef,
-            dumCount,
-            reason:
-              `LTA ${lta.ltaRef} (${dumCount} DUM) is taking too long — not finished after ` +
-              `~${Math.round(expectedMin)} min. The process may be stuck or stopped.`,
-            onLog: emit,
-          }).catch(() => {});
-        }, chronoMs),
-      );
-      emit(
-        "info",
-        `⏱️ Chrono started for LTA ${lta.ltaRef}: expected finish in ~${Math.round(expectedMin)} min (${dumCount} DUM)`,
-      );
+      if (pendingCount === 0) {
+        emit(
+          "info",
+          `⏱️ Chrono skipped for LTA ${lta.ltaRef}: nothing left to sign (${dumCount} DUM already done)`,
+        );
+      } else {
+        const expectedMin = pendingCount * config.ltaChrono.minutesPerDum;
+        const chronoMs = Math.max(60_000, Math.round(expectedMin * 60_000));
+        const scope =
+          pendingCount === dumCount
+            ? `${dumCount} DUM`
+            : `${pendingCount} of ${dumCount} DUM remaining`;
+        chronoTimers.set(
+          lta.ltaRef,
+          setTimeout(() => {
+            chronoTimers.delete(lta.ltaRef);
+            sendWhatsApp(
+              `⏱️ PROBLEM - LTA ${lta.ltaRef} (${scope}) is taking too long: ` +
+                `not finished after ~${Math.round(expectedMin)} min (expected done by then). ` +
+                `The process may be stuck, stopped, or missing DUMs — please check.`,
+              emit,
+            ).catch(() => {});
+            // Also email the failure with a screenshot of the current screen.
+            notifyLtaFailure({
+              ltaRef: lta.ltaRef,
+              dumCount,
+              reason:
+                `LTA ${lta.ltaRef} (${scope}) is taking too long — not finished after ` +
+                `~${Math.round(expectedMin)} min. The process may be stuck or stopped.`,
+              onLog: emit,
+            }).catch(() => {});
+          }, chronoMs),
+        );
+        emit(
+          "info",
+          `⏱️ Chrono started for LTA ${lta.ltaRef}: expected finish in ~${Math.round(expectedMin)} min (${scope})`,
+        );
+      }
     }
+
+    // Set when Edge/the page dies mid-LTA: stops the DUM loop, skips the
+    // reprint recovery passes (they need a live browser) and halts the job.
+    let browserClosed = false;
 
     for (const dum of lta.dums) {
       const pdfName = `DUM ${dum.dumNumber} LTA N°${lta.ltaRef}.pdf`;
@@ -2204,6 +2253,22 @@ export const runSigningJob = async ({
       } catch (error) {
         result.reason = error.message;
 
+        // Browser/page gone → nothing further can succeed. Record THIS DUM as
+        // failed, leave the remaining DUMs untried (rather than instantly
+        // "failing" them all), and abort the whole job.
+        if (isBrowserClosedError(error)) {
+          result.status = "failed";
+          result.reason = `Browser was closed: ${error.message}`;
+          emit(
+            "error",
+            `✗ ABORTED - DUM ${dum.dumNumber} LTA N°${lta.ltaRef}: browser/page was closed — stopping the job`,
+            { error: error.message },
+          );
+          results.push(result);
+          browserClosed = true;
+          break;
+        }
+
         if (isAlreadySignedError(error)) {
           result.status = "already_signed";
           result.reason = "Declaration already definitively registered on BADR";
@@ -2237,9 +2302,11 @@ export const runSigningJob = async ({
     // ── Recovery reprint pass ──────────────────────────────────────────────
     // For DUMs marked "already_signed" (declaration was signed but PDF never
     // saved), try to reprint them using the signed_series.csv.
-    const alreadySignedResults = results.filter(
-      (r) => r.ltaRef === lta.ltaRef && r.status === "already_signed",
-    );
+    const alreadySignedResults = browserClosed
+      ? []
+      : results.filter(
+          (r) => r.ltaRef === lta.ltaRef && r.status === "already_signed",
+        );
     if (alreadySignedResults.length > 0) {
       // Reload CSV — may have new entries written during this run.
       const seriesMap = await loadSignedSeriesCsv(csvPath);
@@ -2324,9 +2391,11 @@ export const runSigningJob = async ({
             !(await fs.pathExists(r.outputPdf)),
         })),
       );
-      const stillMissing = missingChecks
-        .filter((x) => x.missing)
-        .map((x) => x.r);
+      // Reprinting needs a live browser — skip the whole pass (and its
+      // "no CSV entry" warning spam) when Edge is gone.
+      const stillMissing = browserClosed
+        ? []
+        : missingChecks.filter((x) => x.missing).map((x) => x.r);
 
       if (stillMissing.length > 0) {
         const seriesMap = await loadSignedSeriesCsv(csvPath);
@@ -2439,6 +2508,18 @@ export const runSigningJob = async ({
     clearChrono(lta.ltaRef);
     const dumCount = lta.dums.length;
 
+    // Ready-to-paste mail subject, dropped into the LTA folder next to the PDFs
+    // so it can be copied straight into Outlook instead of retyped. Also logged,
+    // so it's copyable from the app's log panel too.
+    const mawbSubject = `MAWB ${lta.ltaRef} - (${dumCount} DUM)`;
+    await fs
+      .writeFile(
+        path.join(targetFolder, "email_subject.txt"),
+        `${mawbSubject}\n`,
+      )
+      .catch(() => {});
+    emit("info", `📋 Mail subject ready to copy: ${mawbSubject}`);
+
     if (isReady) {
       // Send the LTA-READY email once. A marker file guards against re-spamming
       // the recipients when an already-READY LTA is re-run (resume mode).
@@ -2504,6 +2585,17 @@ export const runSigningJob = async ({
 
     // LTA finished (either way): no longer "in progress" for failure emails.
     clearCurrentLta();
+
+    // Browser is gone — every remaining LTA would fail instantly too. Stop here
+    // and leave them untouched so a later run can resume them cleanly.
+    if (browserClosed) {
+      emit(
+        "error",
+        `⛔ Job stopped: the browser was closed during LTA ${lta.ltaRef}. ` +
+          `Remaining LTAs were not started — relaunch to resume.`,
+      );
+      break;
+    }
     }
   } finally {
     // Clear any still-pending chrono watchdogs (e.g. on job abort / error).
