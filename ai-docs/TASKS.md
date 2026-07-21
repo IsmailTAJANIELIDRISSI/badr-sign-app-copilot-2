@@ -4,6 +4,18 @@
 
 ## Recently Completed
 
+### ✅ "Signature Failed" email with screenshot on all failure paths (2026-07-21)
+
+Subject `Signature Failed LTA N°{ref} ({n} DUM)`, body = failure reason + inline screenshot of the current BADR screen. Fires on: LTA → PROBLEM, chrono timeout, job crash / browser closed, and process stop (SIGINT/SIGTERM). Deduped to one email per LTA per run; degrades gracefully (still emails) when the browser is closed and no screenshot can be taken. See PROGRESS.md.
+
+**Blocked on:** email is hard-disabled in `config.js` (`enabled: false`) — revert that line to re-enable both READY and failure emails.
+
+### ✅ Signing loader wait burned the full 120 s timeout (2026-07-21)
+
+`waitForSigningReady` latched `waitFor({state:'hidden'})` onto the catch-all `div:has-text('Traitement en cours')`, which matches any **ancestor** div containing the text. PrimeFaces hides the blockUI but leaves the text in the DOM, so `.first()` resolved to an always-visible page wrapper that never hides → full `config.timeout` (120 s) burned per DUM, swallowed by `.catch(() => {})`, still logged `✓ Signing loader hidden`.
+
+Fixed with a narrow `SIGNING_LOADER_SELECTORS` + a polling `waitForSigningLoaderGone()` + truthful logging, and the narrow set in Phase 2 (which also removes the bogus `⚠ Signing readiness wait exceeded 6s` warning). Verified in real Chromium: **120 000 ms → 285 ms**. Saves ~2 min per DUM (~30 min on a 19-DUM LTA). See PROGRESS.md.
+
 ### ✅ Email + WhatsApp notifications + per-LTA chrono (2026-07-06)
 
 New `server/notifications.js`. On LTA **READY** → email (`MAWB {ref} ({n} DUM)`, empty body, all signed PDFs attached) to the Medafrica To/CC lists, sent once per LTA (`.email_sent` marker). WhatsApp (CallMeBot) alerts on **PROBLEM** folders, job errors, process stop (`SIGINT`/`SIGTERM`), and a per-LTA **chrono** watchdog (`LTA_MINUTES_PER_DUM = 1.25`, i.e. 16 DUMs ≈ 20 min). Config in `server/config.js` (`email`, `whatsapp`, `ltaChrono`); vars in `.env.example`. See PROGRESS.md.

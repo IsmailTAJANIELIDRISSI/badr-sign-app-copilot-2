@@ -3,7 +3,15 @@ import os from "os";
 import fs from "fs-extra";
 import { config } from "./config.js";
 import { BADRConnection } from "./badrConnection.js";
-import { sendLtaReadyEmail, sendWhatsApp } from "./notifications.js";
+import {
+  sendLtaReadyEmail,
+  sendWhatsApp,
+  notifyLtaFailure,
+  setActiveConnection,
+  setCurrentLta,
+  clearCurrentLta,
+  resetFailureNotifications,
+} from "./notifications.js";
 
 const REQUIRED_DOC_HINTS = ["TRANSPORT", "FACTURE"];
 const BADR_INTERNAL_ERROR_HINTS = [
@@ -488,10 +496,26 @@ const clickImprimer = async (page) => {
   }
 };
 
+// Broad set — fine for DETECTING that signing started (any match will do).
 const LOADING_SELECTORS = [
   "#j_id_9:has-text('Traitement en cours')",
   "div.ui-blockui-content:has-text('Traitement en cours')",
   "div:has-text('Traitement en cours')",
+];
+
+// Narrow set — used to decide when the signing overlay has GONE AWAY.
+//
+// It deliberately EXCLUDES the catch-all `div:has-text('Traitement en cours')`
+// above. Playwright's :has-text() matches any element whose *subtree* contains
+// the text, and PrimeFaces hides its blockUI with display:none while leaving the
+// text in the DOM. So after signing finishes that catch-all still matches an
+// always-visible outer page wrapper — and `.first()` latches onto it. Waiting for
+// that wrapper to become "hidden" never succeeds, burning the full config.timeout
+// (120 s) on every DUM. Mirrors DECL_SPINNER_SELECTORS, which clears in 2-3 s.
+const SIGNING_LOADER_SELECTORS = [
+  "#j_id_9:has-text('Traitement en cours')",
+  "div.ui-blockui-content:has-text('Traitement en cours')",
+  "div.ui-blockui-content img[src*='ajax-loading']",
 ];
 
 const PRINT_DOWNLOAD_TIMEOUT_MS = 90000;
@@ -510,6 +534,36 @@ const appendLtaLog = (logPath, level, message, meta = {}) => {
   } catch {
     // Non-blocking: file logging should never stop automation flow.
   }
+};
+
+/**
+ * Poll until the signing overlay is no longer VISIBLE.
+ *
+ * Polls (re-evaluating the selectors each time) instead of latching a locator
+ * with waitFor({state:'hidden'}): a latched locator can resolve to an ancestor
+ * that never hides, which silently costs the full timeout. Requires 2 clear
+ * polls in a row so a momentary PrimeFaces re-render blip isn't read as "done".
+ *
+ * @returns {Promise<{cleared: boolean, elapsedMs: number}>}
+ */
+const waitForSigningLoaderGone = async (conn, onLog, timeoutMs) => {
+  const page = conn.page;
+  const start = Date.now();
+  let clearPolls = 0;
+
+  while (Date.now() - start < timeoutMs) {
+    await ensureNoBadrInternalError(conn, onLog, "signing loader wait");
+    const loading = await firstVisible(page, SIGNING_LOADER_SELECTORS, 120);
+    if (loading) {
+      clearPolls = 0;
+    } else {
+      clearPolls += 1;
+      if (clearPolls >= 2) return { cleared: true, elapsedMs: Date.now() - start };
+    }
+    await page.waitForTimeout(250);
+  }
+
+  return { cleared: false, elapsedMs: Date.now() - start };
 };
 
 const waitForSigningReady = async (conn, onLog) => {
@@ -540,12 +594,20 @@ const waitForSigningReady = async (conn, onLog) => {
 
   // ── Phase 1b: wait for loader to disappear (no shared budget) ────────────
   if (sawLoading) {
-    const loadingHit = await firstVisible(page, LOADING_SELECTORS, 500);
-    if (loadingHit) {
-      await loadingHit.loc
-        .waitFor({ state: "hidden", timeout: loaderWaitMs })
-        .catch(() => {});
-      onLog("debug", "✓ Signing loader hidden");
+    const { cleared, elapsedMs } = await waitForSigningLoaderGone(
+      conn,
+      onLog,
+      loaderWaitMs,
+    );
+    const secs = (elapsedMs / 1000).toFixed(1);
+    if (cleared) {
+      onLog("debug", `✓ Signing loader hidden after ${secs}s`);
+    } else {
+      // Report the timeout honestly instead of claiming the loader cleared.
+      onLog(
+        "warn",
+        `⚠ Signing loader still visible after ${secs}s (timeout) — continuing anyway`,
+      );
     }
   }
 
@@ -557,7 +619,10 @@ const waitForSigningReady = async (conn, onLog) => {
   while (Date.now() - imprimerStart < imprimerReadyMs) {
     await ensureNoBadrInternalError(conn, onLog, "signing wait loop");
 
-    const loading = await firstVisible(page, LOADING_SELECTORS, 120);
+    // Narrow set: the broad one always matches a visible ancestor div (the text
+    // stays in the DOM after the overlay hides), which would make this loop
+    // believe the loader is still up and never confirm IMPRIMER.
+    const loading = await firstVisible(page, SIGNING_LOADER_SELECTORS, 120);
     if (loading) {
       stableVisibleCount = 0;
       await page.waitForTimeout(250);
@@ -1782,6 +1847,11 @@ export const runSigningJob = async ({
   const conn = new BADRConnection();
   await conn.connect();
 
+  // Expose the live connection so any failure path (chrono timeout, job crash,
+  // process stop) can screenshot the current BADR screen for the failure email.
+  setActiveConnection(conn);
+  resetFailureNotifications();
+
   const results = [];
 
   // Per-LTA "chrono" watchdog timers. Each fires an independent WhatsApp alert
@@ -1847,6 +1917,9 @@ export const runSigningJob = async ({
     // independent WhatsApp alert (also covers the process being stopped/hung).
     {
       const dumCount = lta.dums.length;
+      // Track the in-progress LTA so job-level / process-level failures can
+      // build the "Signature Failed LTA N°{ref} ({n} DUM)" subject.
+      setCurrentLta(lta.ltaRef, dumCount);
       const expectedMin = dumCount * config.ltaChrono.minutesPerDum;
       const chronoMs = Math.max(60_000, Math.round(expectedMin * 60_000));
       clearChrono(lta.ltaRef);
@@ -1860,6 +1933,15 @@ export const runSigningJob = async ({
               `The process may be stuck, stopped, or missing DUMs — please check.`,
             emit,
           ).catch(() => {});
+          // Also email the failure with a screenshot of the current screen.
+          notifyLtaFailure({
+            ltaRef: lta.ltaRef,
+            dumCount,
+            reason:
+              `LTA ${lta.ltaRef} (${dumCount} DUM) is taking too long — not finished after ` +
+              `~${Math.round(expectedMin)} min. The process may be stuck or stopped.`,
+            onLog: emit,
+          }).catch(() => {});
         }, chronoMs),
       );
       emit(
@@ -2399,16 +2481,29 @@ export const runSigningJob = async ({
         }
       }
     } else {
-      // PROBLEM: missing DUMs / not completed / failures → WhatsApp alert.
+      // PROBLEM: missing DUMs / not completed / failures → WhatsApp + email.
+      const problemDetail =
+        `success=${ltaSuccess}, failed=${ltaFailed}, ` +
+        `pdfs=${existingPdfCount}/${expectedPdfCount}`;
       await sendWhatsApp(
         `⚠️ PROBLEM - LTA ${lta.ltaRef} (${dumCount} DUM): finished with problems ` +
-          `(success=${ltaSuccess}, failed=${ltaFailed}, pdfs=${existingPdfCount}/${expectedPdfCount}). ` +
-          `Folder marked PROBLEM.`,
+          `(${problemDetail}). Folder marked PROBLEM.`,
         emit,
       ).catch((e) =>
         emit("error", `WhatsApp error for LTA ${lta.ltaRef}: ${e.message}`),
       );
+      await notifyLtaFailure({
+        ltaRef: lta.ltaRef,
+        dumCount,
+        reason:
+          `LTA ${lta.ltaRef} finished with problems (${problemDetail}). ` +
+          `Folder marked PROBLEM.`,
+        onLog: emit,
+      }).catch(() => {});
     }
+
+    // LTA finished (either way): no longer "in progress" for failure emails.
+    clearCurrentLta();
     }
   } finally {
     // Clear any still-pending chrono watchdogs (e.g. on job abort / error).

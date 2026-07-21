@@ -8,7 +8,7 @@ import { logger } from "./logger.js";
 import { parseLtaExcel } from "./excelParser.js";
 import { createJob, pushJobLog, state } from "./state.js";
 import { runSigningJob } from "./automation.js";
-import { sendWhatsApp } from "./notifications.js";
+import { sendWhatsApp, notifyLtaFailure } from "./notifications.js";
 
 await fs.ensureDir(config.directories.dums);
 await fs.ensureDir(config.directories.outputs);
@@ -147,12 +147,18 @@ app.post("/api/jobs/run", async (req, res) => {
       pushJobLog(jobId, "error", "Job failed", { error: error.message });
       job.status = "failed";
       job.completedAt = new Date().toISOString();
-      // Notify: the whole signing process errored out / was interrupted.
+      // Notify: the whole signing process errored out / was interrupted
+      // (BADR crash, browser closed mid-run, unexpected exception, ...).
+      const jobLog = (level, message) => pushJobLog(jobId, level, message);
       await sendWhatsApp(
         `❌ PROBLEM - Signing process stopped with an error: ${error.message}. ` +
           `Please check the app.`,
-        (level, message) => pushJobLog(jobId, level, message),
+        jobLog,
       ).catch(() => {});
+      await notifyLtaFailure({
+        reason: `Signing process stopped with an error: ${error.message}`,
+        onLog: jobLog,
+      }).catch(() => {});
     }
   })();
 });
@@ -261,11 +267,16 @@ const notifyOnShutdown = async (signal) => {
   _shuttingDown = true;
   const running = [...state.jobs.values()].some((j) => j.status === "running");
   if (running) {
+    const sigLog = (level, message) => logger.info({ signal }, message);
     await sendWhatsApp(
       `🛑 PROBLEM - Signing process was stopped (${signal}) while a job was still running. ` +
         `Some LTAs may be incomplete — please check.`,
-      (level, message) => logger.info({ signal }, message),
+      sigLog,
     ).catch(() => {});
+    await notifyLtaFailure({
+      reason: `Signing process was stopped (${signal}) while the job was still running.`,
+      onLog: sigLog,
+    }).catch(() => {});
   }
   process.exit(0);
 };

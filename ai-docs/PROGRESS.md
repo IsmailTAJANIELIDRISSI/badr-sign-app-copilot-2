@@ -4,6 +4,57 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-21 — Fix: signing loader wait burned the full 120 s timeout on every DUM
+
+**Problem:** After signing, BADR's "Traitement en cours" overlay disappears within seconds, but the app took ~2 min to notice. Log timing gave it away: `16:43:38 → 16:45:38` = **exactly 120 000 ms** = `config.timeout`. That wasn't detection, it was a timeout expiring.
+
+**Root cause:** `waitForSigningReady` Phase 1b latched `waitFor({ state: "hidden" })` onto whatever `firstVisible(page, LOADING_SELECTORS)` returned. The third entry was the catch-all `div:has-text('Traitement en cours')`. Playwright's `:has-text()` matches any element whose **subtree** contains the text, and PrimeFaces hides its blockUI with `display:none` while **leaving the text in the DOM**. So once the real overlay hid, `firstVisible` fell through to that catch-all and `.first()` latched onto an always-visible outer page wrapper — which never becomes hidden. The wait burned the full timeout, the error was swallowed by `.catch(() => {})`, and it still logged `✓ Signing loader hidden`. Counter-intuitively, **the faster BADR signed, the more reliably the full 120 s was wasted.**
+
+The same catch-all also made Phase 2 always "see" a loader, so IMPRIMER was never confirmed → the spurious `⚠ Signing readiness wait exceeded 6s post-loader` warning on every DUM.
+
+**Solution (`server/automation.js`):**
+1. New **`SIGNING_LOADER_SELECTORS`** — narrow, no catch-all (mirrors `DECL_SPINNER_SELECTORS`, which provably clears in 2-3 s). `LOADING_SELECTORS` is kept for *detection*, where a broad match is harmless.
+2. New **`waitForSigningLoaderGone()`** — **polls** (re-evaluating selectors each time) until no *visible* loader, requiring 2 consecutive clear polls to ignore re-render blips. Returns `{ cleared, elapsedMs }`. Polling avoids latching onto an ancestor that never hides.
+3. Phase 1b logs **truthfully**: `✓ Signing loader hidden after Xs` vs `⚠ Signing loader still visible after Xs (timeout)`.
+4. Phase 2 now uses the narrow set, fixing the bogus 6 s warning.
+
+**Verified** in a real headless Chromium reproducing the PrimeFaces DOM: after `display:none`, the broad selector still reported a visible loader and `waitFor` timed out, while the narrow poll cleared in **285 ms**.
+
+**Impact:** ~2 min saved **per DUM** — roughly **30+ min on a 19-DUM LTA**.
+
+**Files changed:** `server/automation.js`.
+
+---
+
+## 2026-07-21 — Feature: "Signature Failed" email with screenshot on every failure path
+
+**Problem:** Only the happy path (LTA READY) sent an email. When an LTA failed, hung, the browser was closed, or the process stopped, there was no email — and no visual of what BADR was showing at the moment things broke.
+
+**Solution — `server/notifications.js`:**
+
+- **`sendLtaFailedEmail`** — Subject `Signature Failed LTA N°{ref} ({n} DUM)`; body is the failure reason plus the **screenshot of the current BADR screen embedded inline** (`cid:badrscreen`) and attached.
+- **`captureScreenshot`** — screenshots the live page into `logs/screenshots/`. Returns `null` (never throws) when the browser is closed/unreachable; the email still goes out saying no screenshot was available.
+- **`setActiveConnection(conn)`** — stores the **connection**, not the page, because `conn.page` is swapped during reprint popups, so screenshots always follow the current page.
+- **`setCurrentLta` / `clearCurrentLta`** — tracks the in-progress LTA so job-level and process-level failures (which don't know the LTA) can still build the subject.
+- **`notifyLtaFailure`** — one-stop notifier: screenshot + email, **deduped to one failure email per LTA per run** (so a chrono timeout followed by a PROBLEM finish doesn't double-send). Never throws.
+
+**Wired into all failure paths:**
+
+| Path | Location |
+| --- | --- |
+| LTA finishes PROBLEM | `automation.js` finalization |
+| Chrono timeout (taking too long) | `automation.js` chrono `setTimeout` |
+| Job crash / browser closed mid-run | `index.js` `/api/jobs/run` catch |
+| Process stopped (SIGINT/SIGTERM) | `index.js` shutdown handler |
+
+**Verified** with a stubbed transport: subject format, inline screenshot embed, dedup, browser-closed fallback, current-LTA fallback, and no-LTA skip.
+
+⚠️ **Email is still hard-disabled** in `config.js` (`enabled: false`). Failure emails are logged as skipped until that's reverted to `toBool(process.env.EMAIL_ENABLED, false)`.
+
+**Files changed:** `server/notifications.js`, `server/automation.js`, `server/index.js`.
+
+---
+
 ## 2026-07-07 — Fix: LTA-READY email left no trace in the per-LTA log
 
 **Problem:** The notification block runs *after* `fs.move()` renames the LTA folder to `… READY`. The per-LTA log (`{ltaRef}.log`) lives **inside** that folder, and `appendLtaLog` swallows all write errors. So every line emitted after the rename (the READY mark **and** the email attempt) tried to append to the now-missing old path, threw `ENOENT`, and was silently dropped. The log always cut off exactly at `Completed LTA … pdfs=N/N`, making it look like the email code never ran / failed silently.

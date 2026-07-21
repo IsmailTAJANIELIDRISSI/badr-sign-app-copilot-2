@@ -43,17 +43,17 @@ const toList = (value, fallback) => {
 // Real Medafrica recipients for the LTA-READY notification email.
 // Overridable via EMAIL_TO / EMAIL_CC env vars (e.g. for testing).
 const DEFAULT_EMAIL_TO = [
-  "Abderazzak.tamraoui@medafrica-log.com",
-  "abdelhak.tachrify@medafrica-log.com",
+  // "Abderazzak.tamraoui@medafrica-log.com",
+  // "abdelhak.tachrify@medafrica-log.com",
   "nouhaila.elallali@medafrica-log.com",
   "nouhaila.orfane@medafrica-log.com",
   "OUSSAMA.FARIS@medafrica-log.com",
-  "ahmed.baazzouz@medafrica-log.com",
-  "imane.hamadi@medafrica-log.com",
+  // "ahmed.baazzouz@medafrica-log.com",
+  // "imane.hamadi@medafrica-log.com",
 ];
 const DEFAULT_EMAIL_CC = [
-  "imad.amoudi@medafrica-log.com",
-  "hamza.kninis@medafrica-log.com",
+  // "imad.amoudi@medafrica-log.com",
+  // "hamza.kninis@medafrica-log.com",
   "cursorcompte06@gmail.com",
   "ismail.tajani@medafrica-log.com",
 ];
@@ -87,11 +87,18 @@ export const config = {
     year: process.env.BADR_YEAR || String(new Date().getFullYear()),
   },
   email: {
-    enabled: toBool(process.env.EMAIL_ENABLED, false),
+    // ⛔ TEMP HARD-DISABLE: email is force-OFF regardless of EMAIL_ENABLED in .env.
+    // To re-enable later: delete this `enabled: false,` line and uncomment the
+    // toBool line below, then restart the app.
+    enabled: false,
+    // enabled: toBool(process.env.EMAIL_ENABLED, false),
     host: process.env.EMAIL_HOST || "smtp.gmail.com",
     port: toInt(process.env.EMAIL_PORT, 587),
     // 465 = implicit TLS (secure), 587 = STARTTLS (secure=false).
-    secure: toBool(process.env.EMAIL_SECURE, toInt(process.env.EMAIL_PORT, 587) === 465),
+    secure: toBool(
+      process.env.EMAIL_SECURE,
+      toInt(process.env.EMAIL_PORT, 587) === 465,
+    ),
     user: process.env.EMAIL_USER || "",
     pass: process.env.EMAIL_PASS || "",
     from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "",
