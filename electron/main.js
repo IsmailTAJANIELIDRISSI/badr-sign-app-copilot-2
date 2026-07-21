@@ -131,9 +131,9 @@ const createWindow = () => {
 
   mainWindow.loadURL(startUrl);
 
-  if (isDev) {
-    mainWindow.webContents.openDevTools();
-  }
+  // DevTools are NOT opened automatically — they stole half the window on every
+  // dev launch. Open them on demand with Ctrl+Shift+I or Developer ▸ Toggle
+  // Developer Tools (the Developer menu is already registered in dev mode).
 
   mainWindow.on("closed", () => {
     mainWindow = null;
