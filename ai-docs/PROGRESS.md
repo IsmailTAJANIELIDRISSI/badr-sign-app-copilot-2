@@ -4,6 +4,26 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-21 — Fix: per-machine recipient lists caused recurring git merge conflicts
+
+**Problem:** Different machines need different email recipients (test inbox vs the real Medafrica team). Users were changing them by editing `server/config.js` — a **tracked** file. `electron/main.js` auto-pulls on every startup (`git stash` → `pull` → `stash pop`), so a local edit to `config.js` plus an upstream change to the same file produced a conflicted `stash pop`. That wrote `<<<<<<< Updated upstream` markers into `config.js`, making it invalid JS → the API server crashed on startup → `SyntaxError: Unexpected token '<<'` and a dead backend (`ECONNREFUSED` on every `/api/*` call).
+
+**Solution — recipients live ONLY in `.env`; `config.js` has no list at all:**
+
+- Removed `DEFAULT_EMAIL_TO` / `DEFAULT_EMAIL_CC` entirely. `config.email.to/cc` are now `toList(process.env.EMAIL_TO, [])` — env-only, **no hardcoded fallback**. With no list in the tracked file, there is nothing left to merge-conflict over.
+- **No recipients ⇒ no email**, logged loudly (`EMAIL_TO is empty — set EMAIL_TO in .env`). Guard added at the single choke point `getTransporter()`, so it covers both the READY and the failure email. Deliberate: a missing list must never silently fall back to the real team, and every machine states its recipients explicitly.
+- Reverted the `enabled: false` hard-disable back to `toBool(process.env.EMAIL_ENABLED, false)`; email is toggled per machine from `.env`, never by editing code.
+- `toList()` improved: splits on `;` `,` or newline, keeps `Name <addr>` Outlook-paste entries, drops fragments without `@`.
+- `.env.example` carries both ready-to-paste blocks (test inbox / full production list).
+
+**Rule going forward:** shared *code* → tracked files; every machine-specific *value* → `.env` (gitignored). Never edit a tracked file to configure one machine.
+
+**Recovery for an already-conflicted checkout:** `git checkout HEAD -- server/config.js`, then `git stash drop`.
+
+**Files changed:** `server/config.js`, `.env.example`.
+
+---
+
 ## 2026-07-21 — Fix: signing loader wait burned the full 120 s timeout on every DUM
 
 **Problem:** After signing, BADR's "Traitement en cours" overlay disappears within seconds, but the app took ~2 min to notice. Log timing gave it away: `16:43:38 → 16:45:38` = **exactly 120 000 ms** = `config.timeout`. That wasn't detection, it was a timeout expiring.

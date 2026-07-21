@@ -25,6 +25,14 @@ const getTransporter = async (onLog = noopLog) => {
     onLog("warn", "Email enabled but EMAIL_HOST/EMAIL_USER/EMAIL_PASS incomplete — skipping email");
     return null;
   }
+  // Recipients come only from .env — refuse to send to nobody, and say so.
+  if (!config.email.to.length) {
+    onLog(
+      "warn",
+      "Email enabled but EMAIL_TO is empty — set EMAIL_TO in .env (see .env.example). Skipping email.",
+    );
+    return null;
+  }
   if (_transporter) return _transporter;
 
   let nodemailer;

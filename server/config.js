@@ -31,32 +31,32 @@ const toBool = (value, fallback = false) => {
   return String(value).toLowerCase() === "true";
 };
 
-// Split a "a@x.com; b@y.com , c@z.com" string into a clean array.
-const toList = (value, fallback) => {
-  if (value === undefined || value === null || value === "") return fallback;
+// Parse a recipient list from an env var.
+// Accepts plain addresses and Outlook-style paste, separated by ; , or newline:
+//   "a@x.com; b@y.com"
+//   "Nouhaila ELALLALI <nouhaila.elallali@medafrica-log.com>; Imad <imad@x.com>"
+// Entries without "@" are dropped (e.g. the "Surname" half of a name split on a
+// comma), which keeps a pasted Outlook list usable.
+const toList = (value, fallback = []) => {
+  if (value === undefined || value === null || String(value).trim() === "")
+    return fallback;
   return String(value)
-    .split(/[;,]/)
+    .split(/[;,\n]/)
     .map((s) => s.trim())
-    .filter(Boolean);
+    .filter((s) => s.includes("@"));
 };
 
-// Real Medafrica recipients for the LTA-READY notification email.
-// Overridable via EMAIL_TO / EMAIL_CC env vars (e.g. for testing).
-const DEFAULT_EMAIL_TO = [
-  // "Abderazzak.tamraoui@medafrica-log.com",
-  // "abdelhak.tachrify@medafrica-log.com",
-  "nouhaila.elallali@medafrica-log.com",
-  "nouhaila.orfane@medafrica-log.com",
-  "OUSSAMA.FARIS@medafrica-log.com",
-  // "ahmed.baazzouz@medafrica-log.com",
-  // "imane.hamadi@medafrica-log.com",
-];
-const DEFAULT_EMAIL_CC = [
-  // "imad.amoudi@medafrica-log.com",
-  // "hamza.kninis@medafrica-log.com",
-  "cursorcompte06@gmail.com",
-  "ismail.tajani@medafrica-log.com",
-];
+// ─────────────────────────────────────────────────────────────────────────────
+// Email recipients live ONLY in .env (EMAIL_TO / EMAIL_CC) — never in this file.
+//
+// This file is tracked by git and the app auto-pulls on startup, so hardcoding
+// per-machine recipients here caused merge conflicts that broke the app. `.env`
+// is gitignored: each machine sets its own list, nothing to conflict over.
+//
+// Consequence: a machine with no EMAIL_TO sends NO email (logged loudly). That
+// is deliberate — better a visible no-send than silently mailing wrong people.
+// The production list to paste into .env is in .env.example.
+// ─────────────────────────────────────────────────────────────────────────────
 
 export const config = {
   workspaceRoot,
@@ -87,11 +87,9 @@ export const config = {
     year: process.env.BADR_YEAR || String(new Date().getFullYear()),
   },
   email: {
-    // ⛔ TEMP HARD-DISABLE: email is force-OFF regardless of EMAIL_ENABLED in .env.
-    // To re-enable later: delete this `enabled: false,` line and uncomment the
-    // toBool line below, then restart the app.
-    enabled: false,
-    // enabled: toBool(process.env.EMAIL_ENABLED, false),
+    // Off unless the machine's .env opts in with EMAIL_ENABLED=true.
+    // Toggle email per machine from .env — never by editing this file.
+    enabled: toBool(process.env.EMAIL_ENABLED, false),
     host: process.env.EMAIL_HOST || "smtp.gmail.com",
     port: toInt(process.env.EMAIL_PORT, 587),
     // 465 = implicit TLS (secure), 587 = STARTTLS (secure=false).
@@ -102,8 +100,9 @@ export const config = {
     user: process.env.EMAIL_USER || "",
     pass: process.env.EMAIL_PASS || "",
     from: process.env.EMAIL_FROM || process.env.EMAIL_USER || "",
-    to: toList(process.env.EMAIL_TO, DEFAULT_EMAIL_TO),
-    cc: toList(process.env.EMAIL_CC, DEFAULT_EMAIL_CC),
+    // Env-only. No hardcoded fallback: unset EMAIL_TO => no email is sent.
+    to: toList(process.env.EMAIL_TO, []),
+    cc: toList(process.env.EMAIL_CC, []),
   },
   whatsapp: {
     enabled: toBool(process.env.WHATSAPP_ENABLED, false),

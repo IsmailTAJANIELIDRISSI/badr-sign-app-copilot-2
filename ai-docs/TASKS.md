@@ -4,6 +4,12 @@
 
 ## Recently Completed
 
+### ✅ Per-machine recipient lists — no more config.js merge conflicts (2026-07-21)
+
+**Rule: shared/production values → `config.js` (committed). Machine-specific values → `.env` (gitignored). Never edit a tracked file to configure one machine** — `electron/main.js` auto-pulls on startup (stash → pull → stash pop), so local edits to tracked files conflict and leave `<<<<<<<` markers that break the app.
+
+Recipients now live **only** in `.env` (`EMAIL_TO` / `EMAIL_CC` / `EMAIL_ENABLED`) — `config.js` has no list at all, so there is nothing to conflict over. If `EMAIL_TO` is empty, no email is sent and it's logged loudly (never falls back to the real team). Ready-to-paste test and production blocks are in `.env.example`. See PROGRESS.md.
+
 ### ✅ "Signature Failed" email with screenshot on all failure paths (2026-07-21)
 
 Subject `Signature Failed LTA N°{ref} ({n} DUM)`, body = failure reason + inline screenshot of the current BADR screen. Fires on: LTA → PROBLEM, chrono timeout, job crash / browser closed, and process stop (SIGINT/SIGTERM). Deduped to one email per LTA per run; degrades gracefully (still emails) when the browser is closed and no screenshot can be taken. See PROGRESS.md.
