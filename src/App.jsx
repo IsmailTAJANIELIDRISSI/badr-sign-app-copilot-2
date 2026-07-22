@@ -101,14 +101,10 @@ function App() {
         // the user must paste them in.
         if (data.method === "clipboard") {
           alert(
-            `Email opened with the subject filled in.\n\n` +
-              `${data.count} PDF${data.count > 1 ? "s" : ""} have been copied — ` +
-              `click inside the message and press Ctrl+V to attach them.\n\n` +
-              `(If pasting doesn't attach, the PDF folder has been opened so you can drag them in.)`,
+            `Email opened with the recipients and subject filled in.\n\n` +
+              `The ${data.count} PDF${data.count > 1 ? "s" : ""} have been copied — ` +
+              `click inside the message and press Ctrl+V to attach them.`,
           );
-          if (data.folder && isElectron) {
-            window.electronAPI.openFolder(data.folder);
-          }
         }
         setTimeout(
           () =>
@@ -122,11 +118,6 @@ function App() {
       } else {
         setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
         alert(data.reason || "Could not open the Outlook draft.");
-        // If the PDFs exist but Outlook couldn't be driven, at least open the
-        // folder so the user can attach them by hand.
-        if (data.folder && isElectron) {
-          window.electronAPI.openFolder(data.folder);
-        }
         setTimeout(
           () =>
             setEmailState((p) => {

@@ -306,11 +306,12 @@ app.post("/api/lta/outlook-email", async (req, res) => {
     }
 
     const to = config.outlookTo.join("; ");
-    // Bare addresses (strip the "Name <…>" wrapper) for the mailto: fallback,
-    // which per RFC 6068 wants comma-separated plain addresses.
+    // Bare addresses (strip the "Name <…>" wrapper) for the mailto: fallback.
+    // Joined with ";" — Outlook separates recipients by semicolons, and a
+    // comma-joined list gets treated as a single malformed address.
     const mailtoTo = config.outlookTo
       .map((s) => (s.match(/<([^>]+)>/)?.[1] || s).trim())
-      .join(",");
+      .join(";");
     const subject = `MAWB ${ltaRef} - (${dumsCount ?? pdfs.length} DUM)`;
     const filesArray = `@(${pdfs.map(psq).join(",")})`;
 
