@@ -70,10 +70,62 @@ function App() {
 
   const [copiedSubject, setCopiedSubject] = useState("");
 
+  // fileName -> "sending" | "sent" | "error"  for the Outlook button state.
+  const [emailState, setEmailState] = useState({});
+
   const copySubject = async (item) => {
     if (await copyToClipboard(mawbSubject(item))) {
       setCopiedSubject(item.fileName);
       setTimeout(() => setCopiedSubject(""), 1600);
+    }
+  };
+
+  // Open an Outlook draft with the LTA's signed PDFs attached (backend uses
+  // Outlook COM — mailto: can't carry attachments).
+  const sendByEmail = async (item) => {
+    setEmailState((p) => ({ ...p, [item.fileName]: "sending" }));
+    try {
+      const r = await fetch("/api/lta/outlook-email", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ltaRef: item.ltaRef,
+          dumsCount: item.dumsCount,
+        }),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        setEmailState((p) => ({ ...p, [item.fileName]: "sent" }));
+        setTimeout(
+          () =>
+            setEmailState((p) => {
+              const n = { ...p };
+              delete n[item.fileName];
+              return n;
+            }),
+          2500,
+        );
+      } else {
+        setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
+        alert(data.reason || "Could not open the Outlook draft.");
+        // If the PDFs exist but Outlook couldn't be driven, at least open the
+        // folder so the user can attach them by hand.
+        if (data.folder && isElectron) {
+          window.electronAPI.openFolder(data.folder);
+        }
+        setTimeout(
+          () =>
+            setEmailState((p) => {
+              const n = { ...p };
+              delete n[item.fileName];
+              return n;
+            }),
+          2500,
+        );
+      }
+    } catch (e) {
+      setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
+      alert(`Email failed: ${e.message}`);
     }
   };
 
@@ -585,6 +637,39 @@ function App() {
                                 ? "✓"
                                 : "Copy"}
                             </span>
+                          </button>
+
+                          {/* Envoyer par email — opens an Outlook draft with
+                              the signed PDFs attached. */}
+                          <button
+                            type="button"
+                            onClick={() => sendByEmail(item)}
+                            disabled={emailState[item.fileName] === "sending"}
+                            title="Ouvrir un brouillon Outlook avec les PDF joints"
+                            className={`mt-2 flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-sm transition disabled:opacity-70 ${
+                              emailState[item.fileName] === "error"
+                                ? "bg-rose-500 hover:bg-rose-600"
+                                : emailState[item.fileName] === "sent"
+                                  ? "bg-emerald-500"
+                                  : "bg-[#0F6CBD] hover:bg-[#0B5AA2]"
+                            }`}
+                          >
+                            <span aria-hidden className="text-base leading-none">
+                              {emailState[item.fileName] === "sending"
+                                ? "⏳"
+                                : emailState[item.fileName] === "sent"
+                                  ? "✓"
+                                  : emailState[item.fileName] === "error"
+                                    ? "⚠"
+                                    : "✉"}
+                            </span>
+                            {emailState[item.fileName] === "sending"
+                              ? "Ouverture d'Outlook…"
+                              : emailState[item.fileName] === "sent"
+                                ? "Brouillon ouvert"
+                                : emailState[item.fileName] === "error"
+                                  ? "Échec — réessayer"
+                                  : "Envoyer par email"}
                           </button>
 
                           <label className="mt-3 block text-[10px] font-bold uppercase tracking-wider text-steel">

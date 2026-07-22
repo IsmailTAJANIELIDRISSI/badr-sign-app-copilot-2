@@ -104,6 +104,19 @@ export const config = {
     to: toList(process.env.EMAIL_TO, []),
     cc: toList(process.env.EMAIL_CC, []),
   },
+  // Recipients for the manual "Envoyer par email" button (opens an Outlook
+  // draft with the PDFs attached). Distinct from the automated `email.to` list
+  // above. Override per machine with OUTLOOK_TO in .env; the default below is
+  // the agreed To list. "Name <addr>" form is fine — Outlook parses it.
+  outlookTo: toList(process.env.OUTLOOK_TO, [
+    "Abderazzak Tamraoui <Abderazzak.tamraoui@medafrica-log.com>",
+    "Abdelhak TACHRIFY <abdelhak.tachrify@medafrica-log.com>",
+    "Amoudi Imad <imad.amoudi@medafrica-log.com>",
+    "Ahmed Baazzouz <ahmed.baazzouz@medafrica-log.com>",
+    "Nouhaila ORFANE <nouhaila.orfane@medafrica-log.com>",
+    "OUSSAMA FARIS <OUSSAMA.FARIS@medafrica-log.com>",
+    "Hamza KNINIS <hamza.kninis@medafrica-log.com>",
+  ]),
   whatsapp: {
     enabled: toBool(process.env.WHATSAPP_ENABLED, false),
     provider: process.env.WHATSAPP_PROVIDER || "callmebot",

@@ -4,6 +4,30 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-22 — Feature: "Envoyer par email" button → Outlook draft with PDFs attached
+
+**Goal:** A blue button on each LTA card that opens Outlook prefilled with the agreed To list, subject `MAWB {ref} - ({n} DUM)`, empty body, and **every signed DUM PDF already attached** — so the user just reviews and hits Send.
+
+**Key constraint:** `mailto:` links cannot carry attachments. So on Windows we drive **classic Outlook via COM** (PowerShell) instead.
+
+**Backend — `POST /api/lta/outlook-email` (`server/index.js`):**
+- `findLtaPdfs(ltaRef)` locates the LTA folder (`… READY` / `… PROBLEM` / plain) and returns its `DUM N …pdf` files sorted by DUM number.
+- Generates a PowerShell script: `Outlook.Application` COM → `CreateItem(0)` → set `To`/`Subject` → `Attachments.Add` each PDF → `Display($false)` (shows the draft, never sends).
+- **Encoding gotcha (found via test):** LTA folders are named `LTA N° …`. Passing the `°` (and accented recipient names) inline via `powershell -Command` corrupts them on a non-UTF-8 console code page (`N°` → `N�`), so `Attachments.Add` silently misses the files. Fix: write the script to a temp `.ps1` **with a UTF-8 BOM** and run it with `-File` + `Test-Path -LiteralPath`. Verified `ATTACHED=2` through a real `N°` path.
+- Failure (no classic Outlook / new-Outlook-only machine) returns `{ ok:false, folder }` with a clear reason.
+
+**Recipients:** new `config.outlookTo` — env-overridable (`OUTLOOK_TO`) with the agreed 7-name default, kept **out of the automated `email.to` list** (different audience). Follows the env-first rule so it never causes the tracked-file merge conflicts we hit before.
+
+**Frontend (`src/App.jsx`):** blue Outlook-style button (`Envoyer par email`) per card with ⏳/✓/⚠ states; on failure it alerts the reason and, in Electron, opens the PDF folder so the user can drag them in manually.
+
+**Verified:** Outlook COM present on this machine; endpoint returns proper JSON for unknown LTA; attach mechanism confirmed end-to-end (2 PDFs) with the `N°` path; frontend builds.
+
+⚠️ Requires the **classic Outlook desktop** app (the "new Outlook" and web versions can't be COM-automated). ⚠️ Windows-only (returns 400 elsewhere).
+
+**Files changed:** `server/config.js`, `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-07-21 — Redesign: tabbed app shell, logs moved out of the page bottom
 
 **Problem:** Everything lived on one long scrolling page with the live logs pinned underneath the LTA cards. During a run you had to scroll past every card to watch progress, and the log box was a fixed 420 px window inside a page that itself scrolled — awkward and cramped.

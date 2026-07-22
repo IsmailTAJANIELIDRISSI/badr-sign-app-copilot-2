@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ "Envoyer par email" — Outlook draft with PDFs attached (2026-07-22)
+
+Blue button per LTA card → `POST /api/lta/outlook-email` drives classic Outlook via COM (PowerShell) to open a draft with the `config.outlookTo` list, subject `MAWB {ref} - ({n} DUM)`, empty body, and every signed PDF attached (mailto: can't attach). Recipients env-overridable via `OUTLOOK_TO`. **Requires classic Outlook desktop; Windows-only.** Script is run from a UTF-8-BOM temp `.ps1` via `-File` so the `N°` in folder paths isn't corrupted. See PROGRESS.md.
+
 ### ✅ UI redesign — tabbed shell, logs in their own tab (2026-07-21)
 
 `src/App.jsx` rebuilt as a fixed-height shell with **LTAs** (setup) and **Activity** (full-viewport log console with level/text filters, auto-scroll, copy) tabs. Header keeps a live progress bar + current LTA visible from either tab. Live counters are derived from the log stream, which **also works around TASKS #10** (`job.progress.done` only being filled after the job ends) — see the caveat about the 1000-line log cap in PROGRESS.md. Verified against the running app with screenshots.

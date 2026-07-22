@@ -252,6 +252,130 @@ app.post("/api/shippers", express.json(), async (req, res) => {
   }
 });
 
+// ── "Envoyer par email" — open an Outlook draft with the LTA's PDFs attached ──
+//
+// mailto: links can't carry attachments, so on Windows we drive classic Outlook
+// via COM (PowerShell) to build a real draft: To + Subject + every DUM PDF
+// attached, empty body, shown (not sent) for the user to review and send.
+
+// Find the LTA output folder (READY / PROBLEM / plain) and its signed PDFs.
+const findLtaPdfs = async (ltaRef) => {
+  const base = config.directories.signedLtas;
+  for (const suffix of [" READY", " PROBLEM", ""]) {
+    const folder = path.join(base, `LTA N° ${ltaRef}${suffix}`);
+    if (!(await fs.pathExists(folder))) continue;
+    const entries = await fs.readdir(folder);
+    const pdfs = entries
+      .filter((n) => /^DUM \d+ LTA .*\.pdf$/i.test(n))
+      .sort((a, b) => {
+        const na = Number(a.match(/DUM (\d+)/)?.[1] ?? 0);
+        const nb = Number(b.match(/DUM (\d+)/)?.[1] ?? 0);
+        return na - nb;
+      })
+      .map((n) => path.join(folder, n));
+    if (pdfs.length) return { folder, pdfs };
+  }
+  return { folder: null, pdfs: [] };
+};
+
+// Single-quote a value for safe embedding in a PowerShell script.
+const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
+
+app.post("/api/lta/outlook-email", async (req, res) => {
+  const { ltaRef, dumsCount } = req.body || {};
+  if (!ltaRef) {
+    res.status(400).json({ ok: false, reason: "ltaRef is required" });
+    return;
+  }
+  if (process.platform !== "win32") {
+    res.status(400).json({
+      ok: false,
+      reason: "Outlook drafting is only available on Windows",
+    });
+    return;
+  }
+
+  try {
+    const { folder, pdfs } = await findLtaPdfs(ltaRef);
+    if (!pdfs.length) {
+      res.status(404).json({
+        ok: false,
+        reason: `No signed PDFs found for LTA ${ltaRef} yet — sign it first.`,
+      });
+      return;
+    }
+
+    const to = config.outlookTo.join("; ");
+    const subject = `MAWB ${ltaRef} - (${dumsCount ?? pdfs.length} DUM)`;
+    const filesArray = `@(${pdfs.map(psq).join(",")})`;
+
+    // Build the draft via Outlook COM. `.Display()` shows it without sending.
+    //
+    // The script is written to a temp .ps1 with a UTF-8 BOM and run via -File,
+    // NOT passed inline with -Command: LTA folders are named "LTA N° …" and the
+    // "°" (plus accented recipient names) get mangled when non-ASCII is pushed
+    // through -Command on a non-UTF-8 console code page, which then makes
+    // Attachments.Add silently miss the files. The BOM makes PowerShell decode
+    // the file as UTF-8 regardless of code page.
+    const script = `﻿$ErrorActionPreference = 'Stop'
+$ol = New-Object -ComObject Outlook.Application
+$mail = $ol.CreateItem(0)
+$mail.To = ${psq(to)}
+$mail.Subject = ${psq(subject)}
+$mail.Body = ''
+foreach ($f in ${filesArray}) { if (Test-Path -LiteralPath $f) { [void]$mail.Attachments.Add($f) } }
+$mail.Display($false)
+`;
+
+    const os = await import("os");
+    const scriptPath = path.join(
+      os.tmpdir(),
+      `badr-outlook-${ltaRef}-${Date.now()}.ps1`,
+    );
+    await fs.writeFile(scriptPath, script, "utf8");
+
+    const { execFile } = await import("child_process");
+    execFile(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-STA",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        scriptPath,
+      ],
+      { timeout: 40000, windowsHide: true },
+      (err, _stdout, stderr) => {
+        fs.remove(scriptPath).catch(() => {});
+        if (err) {
+          logger.warn(
+            { ltaRef, err: err.message, stderr },
+            "Outlook COM draft failed",
+          );
+          res.status(500).json({
+            ok: false,
+            reason:
+              "Could not open an Outlook draft. Is the classic Outlook desktop app installed and signed in? (The new Outlook / web version can't be automated.)",
+            folder,
+            count: pdfs.length,
+          });
+          return;
+        }
+        logger.info(
+          { ltaRef, count: pdfs.length },
+          "Outlook draft opened with PDFs attached",
+        );
+        res.json({ ok: true, count: pdfs.length, subject, folder });
+      },
+    );
+  } catch (error) {
+    logger.error({ ltaRef, error: error.message }, "outlook-email failed");
+    res.status(500).json({ ok: false, reason: error.message });
+  }
+});
+
 app.listen(config.port, () => {
   logger.info(
     `API listening on http://localhost:${config.port} | Dums folder: ${config.directories.dums}`,
