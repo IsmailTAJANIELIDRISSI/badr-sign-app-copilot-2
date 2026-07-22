@@ -306,25 +306,43 @@ app.post("/api/lta/outlook-email", async (req, res) => {
     }
 
     const to = config.outlookTo.join("; ");
+    // Bare addresses (strip the "Name <…>" wrapper) for the mailto: fallback,
+    // which per RFC 6068 wants comma-separated plain addresses.
+    const mailtoTo = config.outlookTo
+      .map((s) => (s.match(/<([^>]+)>/)?.[1] || s).trim())
+      .join(",");
     const subject = `MAWB ${ltaRef} - (${dumsCount ?? pdfs.length} DUM)`;
     const filesArray = `@(${pdfs.map(psq).join(",")})`;
 
-    // Build the draft via Outlook COM. `.Display()` shows it without sending.
+    // Universal open-in-mail script. Runs from a UTF-8-BOM temp .ps1 via -File so
+    // the "°" in "LTA N° …" paths and accented names aren't corrupted by the
+    // console code page.
     //
-    // The script is written to a temp .ps1 with a UTF-8 BOM and run via -File,
-    // NOT passed inline with -Command: LTA folders are named "LTA N° …" and the
-    // "°" (plus accented recipient names) get mangled when non-ASCII is pushed
-    // through -Command on a non-UTF-8 console code page, which then makes
-    // Attachments.Add silently miss the files. The BOM makes PowerShell decode
-    // the file as UTF-8 regardless of code page.
+    //  1. Try classic Outlook via COM → opens a draft with the PDFs already
+    //     attached (best UX, zero extra clicks).  METHOD=com
+    //  2. If COM is unavailable (NEW Outlook / web has no COM, or a different
+    //     elevation blocks it) → copy the PDFs to the clipboard as files AND
+    //     open the default mail app's compose via mailto:. The user clicks in
+    //     the message and presses Ctrl+V to attach.  METHOD=clipboard
     const script = `﻿$ErrorActionPreference = 'Stop'
-$ol = New-Object -ComObject Outlook.Application
-$mail = $ol.CreateItem(0)
-$mail.To = ${psq(to)}
-$mail.Subject = ${psq(subject)}
-$mail.Body = ''
-foreach ($f in ${filesArray}) { if (Test-Path -LiteralPath $f) { [void]$mail.Attachments.Add($f) } }
-$mail.Display($false)
+$files = ${filesArray}
+try {
+  $ol = New-Object -ComObject Outlook.Application
+  $mail = $ol.CreateItem(0)
+  $mail.To = ${psq(to)}
+  $mail.Subject = ${psq(subject)}
+  $mail.Body = ''
+  foreach ($f in $files) { if (Test-Path -LiteralPath $f) { [void]$mail.Attachments.Add($f) } }
+  $mail.Display($false)
+  Write-Output 'METHOD=com'
+} catch {
+  $comError = $_.Exception.Message
+  try { Set-Clipboard -LiteralPath $files } catch {}
+  $uri = 'mailto:' + ${psq(mailtoTo)} + '?subject=' + [uri]::EscapeDataString(${psq(subject)})
+  Start-Process $uri
+  Write-Output 'METHOD=clipboard'
+  Write-Output ('COMERR=' + $comError)
+}
 `;
 
     const os = await import("os");
@@ -347,27 +365,31 @@ $mail.Display($false)
         scriptPath,
       ],
       { timeout: 40000, windowsHide: true },
-      (err, _stdout, stderr) => {
+      (err, stdout, stderr) => {
         fs.remove(scriptPath).catch(() => {});
-        if (err) {
+        const out = String(stdout || "");
+        if (err && !out.includes("METHOD=")) {
           logger.warn(
             { ltaRef, err: err.message, stderr },
-            "Outlook COM draft failed",
+            "Outlook draft failed",
           );
           res.status(500).json({
             ok: false,
             reason:
-              "Could not open an Outlook draft. Is the classic Outlook desktop app installed and signed in? (The new Outlook / web version can't be automated.)",
+              "Could not open a mail draft. No default mail app configured? " +
+              (stderr || err.message || "").slice(0, 300),
             folder,
             count: pdfs.length,
           });
           return;
         }
+        const method = out.includes("METHOD=com") ? "com" : "clipboard";
+        const comErr = out.match(/COMERR=(.*)/)?.[1]?.trim();
         logger.info(
-          { ltaRef, count: pdfs.length },
-          "Outlook draft opened with PDFs attached",
+          { ltaRef, count: pdfs.length, method, comErr },
+          "Mail draft opened",
         );
-        res.json({ ok: true, count: pdfs.length, subject, folder });
+        res.json({ ok: true, count: pdfs.length, subject, folder, method });
       },
     );
   } catch (error) {

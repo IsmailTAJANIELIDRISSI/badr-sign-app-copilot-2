@@ -96,6 +96,20 @@ function App() {
       const data = await r.json();
       if (r.ok && data.ok) {
         setEmailState((p) => ({ ...p, [item.fileName]: "sent" }));
+        // Classic Outlook (COM) attaches automatically. The clipboard fallback
+        // (new Outlook / web) opens compose with the PDFs on the clipboard —
+        // the user must paste them in.
+        if (data.method === "clipboard") {
+          alert(
+            `Email opened with the subject filled in.\n\n` +
+              `${data.count} PDF${data.count > 1 ? "s" : ""} have been copied — ` +
+              `click inside the message and press Ctrl+V to attach them.\n\n` +
+              `(If pasting doesn't attach, the PDF folder has been opened so you can drag them in.)`,
+          );
+          if (data.folder && isElectron) {
+            window.electronAPI.openFolder(data.folder);
+          }
+        }
         setTimeout(
           () =>
             setEmailState((p) => {

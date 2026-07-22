@@ -4,6 +4,28 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-22 — "Envoyer par email": make it work with BOTH classic AND new Outlook
+
+**Problem:** The first version drove classic Outlook via COM only. On a machine where COM was unavailable (the **new Outlook / web app has no COM interface at all**, or classic runs at a different elevation than the app) the button failed with "Could not open an Outlook draft".
+
+**Solution — the endpoint (`POST /api/lta/outlook-email`) now degrades in one script:**
+
+1. **Try classic Outlook COM** → opens a draft with the PDFs already attached. `METHOD=com` (best UX, zero extra clicks).
+2. **On any COM failure** → `Set-Clipboard -LiteralPath` copies the PDFs to the clipboard as files **and** `Start-Process 'mailto:…'` opens the default mail app's compose (new Outlook, classic, whatever is registered) with To + Subject filled. `METHOD=clipboard`. The UI then tells the user to click in the message and press **Ctrl+V** to attach, and (in Electron) opens the PDF folder as a drag-in fallback.
+
+**Details:**
+- mailto uses **bare** comma-separated addresses (RFC 6068) extracted from the `Name <addr>` entries; the COM path keeps the friendly `Name <addr>` form.
+- If even the mailto launch fails (no default mail app), the real PowerShell/stderr is surfaced in the response instead of a generic message.
+- Response now includes `method` so the UI shows the right guidance.
+
+**Verified:** bare-address extraction correct (7 addresses); generated PowerShell parses (`PSParser` tokenize, both branches) — validated without executing so no mail windows popped.
+
+**Trade-off:** new Outlook can't be fully automated by anyone, so the clipboard+Ctrl+V (or drag) step is the best achievable there. Classic Outlook still gets the fully-automatic attach.
+
+**Files changed:** `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-07-22 — Feature: "Envoyer par email" button → Outlook draft with PDFs attached
 
 **Goal:** A blue button on each LTA card that opens Outlook prefilled with the agreed To list, subject `MAWB {ref} - ({n} DUM)`, empty body, and **every signed DUM PDF already attached** — so the user just reviews and hits Send.
