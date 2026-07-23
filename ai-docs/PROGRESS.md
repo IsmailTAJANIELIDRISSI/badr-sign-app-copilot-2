@@ -4,6 +4,18 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-23 — Fix: Outlook auto-attach failed with "path not found" (the "°" encoding)
+
+**Problem:** On the real machine the "Envoyer par email" button always fell back to clipboard/Ctrl+V instead of auto-attaching. A diagnostic (surface the real COM error + elevation) revealed: **not** elevation (`Administrator: no`), but the COM exception `Ce chemin d'accès n'existe pas` ("the path does not exist"). Node found the PDFs fine (`count: 3`), but the `°` in the `LTA N° …` folder path was being corrupted in the Node → temp `.ps1` → PowerShell handoff, so `Attachments.Add` couldn't find the files. The temp script was written UTF-8 + a literal BOM, which was still misread on that machine's console code page.
+
+**Solution (`server/index.js`):** write the temp `.ps1` as **UTF-16LE with a BOM** (`fs.writeFile(path, "﻿" + script, "utf16le")`) — the encoding Windows PowerShell reads natively — and drop the literal BOM from the template string. Also added a diagnostic: the endpoint now returns `comErr` + `elevated`, shown in the UI's clipboard-fallback alert.
+
+**Verified:** replicated the endpoint's exact script + UTF-16LE write against a real `LTA N° …` folder → `ATTACHED=3`, `METHOD=com`. So on a machine with classic Outlook (non-elevated) the button now opens a draft with all PDFs attached automatically; the clipboard/Ctrl+V path remains the fallback only for new-Outlook-only machines.
+
+**Files changed:** `server/index.js` (+ diagnostic surfaced in `src/App.jsx` from the previous step).
+
+---
+
 ## 2026-07-22 — "Envoyer par email": make it work with BOTH classic AND new Outlook
 
 **Problem:** The first version drove classic Outlook via COM only. On a machine where COM was unavailable (the **new Outlook / web app has no COM interface at all**, or classic runs at a different elevation than the app) the button failed with "Could not open an Outlook draft".

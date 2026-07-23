@@ -315,9 +315,11 @@ app.post("/api/lta/outlook-email", async (req, res) => {
     const subject = `MAWB ${ltaRef} - (${dumsCount ?? pdfs.length} DUM)`;
     const filesArray = `@(${pdfs.map(psq).join(",")})`;
 
-    // Universal open-in-mail script. Runs from a UTF-8-BOM temp .ps1 via -File so
-    // the "°" in "LTA N° …" paths and accented names aren't corrupted by the
-    // console code page.
+    // Universal open-in-mail script. Written as UTF-16LE with a BOM (see below)
+    // so the "°" in "LTA N° …" paths and accented names survive the Node → temp
+    // .ps1 → PowerShell handoff — a UTF-8 file was being misread on some
+    // machines' code pages, corrupting "°" and making Attachments.Add fail with
+    // "Ce chemin d'accès n'existe pas" (path not found).
     //
     //  1. Try classic Outlook via COM → opens a draft with the PDFs already
     //     attached (best UX, zero extra clicks).  METHOD=com
@@ -325,8 +327,9 @@ app.post("/api/lta/outlook-email", async (req, res) => {
     //     elevation blocks it) → copy the PDFs to the clipboard as files AND
     //     open the default mail app's compose via mailto:. The user clicks in
     //     the message and presses Ctrl+V to attach.  METHOD=clipboard
-    const script = `﻿$ErrorActionPreference = 'Stop'
+    const script = `$ErrorActionPreference = 'Stop'
 $files = ${filesArray}
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 try {
   $ol = New-Object -ComObject Outlook.Application
   $mail = $ol.CreateItem(0)
@@ -337,12 +340,13 @@ try {
   $mail.Display($false)
   Write-Output 'METHOD=com'
 } catch {
-  $comError = $_.Exception.Message
+  $comError = ($_.Exception.Message -replace "\\r?\\n"," ")
   try { Set-Clipboard -LiteralPath $files } catch {}
   $uri = 'mailto:' + ${psq(mailtoTo)} + '?subject=' + [uri]::EscapeDataString(${psq(subject)})
   Start-Process $uri
   Write-Output 'METHOD=clipboard'
   Write-Output ('COMERR=' + $comError)
+  Write-Output ('ELEVATED=' + $isAdmin)
 }
 `;
 
@@ -351,7 +355,9 @@ try {
       os.tmpdir(),
       `badr-outlook-${ltaRef}-${Date.now()}.ps1`,
     );
-    await fs.writeFile(scriptPath, script, "utf8");
+    // UTF-16LE + BOM ("﻿"): the encoding Windows PowerShell reads natively.
+    // This is what makes the "°" and accented paths survive intact.
+    await fs.writeFile(scriptPath, "﻿" + script, "utf16le");
 
     const { execFile } = await import("child_process");
     execFile(
@@ -386,11 +392,20 @@ try {
         }
         const method = out.includes("METHOD=com") ? "com" : "clipboard";
         const comErr = out.match(/COMERR=(.*)/)?.[1]?.trim();
+        const elevated = /ELEVATED=True/i.test(out);
         logger.info(
-          { ltaRef, count: pdfs.length, method, comErr },
+          { ltaRef, count: pdfs.length, method, comErr, elevated },
           "Mail draft opened",
         );
-        res.json({ ok: true, count: pdfs.length, subject, folder, method });
+        res.json({
+          ok: true,
+          count: pdfs.length,
+          subject,
+          folder,
+          method,
+          comErr,
+          elevated,
+        });
       },
     );
   } catch (error) {

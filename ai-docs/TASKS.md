@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ Outlook auto-attach "path not found" fixed — UTF-16LE temp script (2026-07-23)
+
+The COM path failed with `Ce chemin d'accès n'existe pas` because the `°` in `LTA N° …` paths was corrupted when the temp `.ps1` (UTF-8 + literal BOM) was read on the machine's code page. Now written as **UTF-16LE + BOM** (`utf16le`), which Windows PowerShell reads natively. Verified `ATTACHED=3` / `METHOD=com` against a real `N°` folder. Classic Outlook (non-elevated) now auto-attaches; clipboard/Ctrl+V remains the new-Outlook-only fallback. Endpoint also returns `comErr`/`elevated` for diagnostics. See PROGRESS.md.
+
 ### ✅ "Envoyer par email" — Outlook draft with PDFs attached (2026-07-22)
 
 Blue button per LTA card → `POST /api/lta/outlook-email` drives classic Outlook via COM (PowerShell) to open a draft with the `config.outlookTo` list, subject `MAWB {ref} - ({n} DUM)`, empty body, and every signed PDF attached (mailto: can't attach). Recipients env-overridable via `OUTLOOK_TO`. **Requires classic Outlook desktop; Windows-only.** Script is run from a UTF-8-BOM temp `.ps1` via `-File` so the `N°` in folder paths isn't corrupted. See PROGRESS.md.

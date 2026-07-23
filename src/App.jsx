@@ -100,10 +100,14 @@ function App() {
         // (new Outlook / web) opens compose with the PDFs on the clipboard —
         // the user must paste them in.
         if (data.method === "clipboard") {
+          const diag = data.comErr
+            ? `\n\n— Diagnostic —\nAuto-attach (classic Outlook COM) failed:\n${data.comErr}\nApp running as Administrator: ${data.elevated ? "YES" : "no"}`
+            : "";
           alert(
             `Email opened with the recipients and subject filled in.\n\n` +
               `The ${data.count} PDF${data.count > 1 ? "s" : ""} have been copied — ` +
-              `click inside the message and press Ctrl+V to attach them.`,
+              `click inside the message and press Ctrl+V to attach them.` +
+              diag,
           );
         }
         setTimeout(
