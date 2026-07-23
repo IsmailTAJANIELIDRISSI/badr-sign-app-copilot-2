@@ -342,6 +342,9 @@ try {
   $mail.Body = ''
   foreach ($f in $files) { if (Test-Path -LiteralPath $f) { [void]$mail.Attachments.Add($f) } }
   $mail.Display($false)
+  # Bring the draft window to the foreground instead of opening it behind the app.
+  $insp = $mail.GetInspector
+  $insp.Activate()
   Write-Output 'METHOD=com'
 } catch {
   $comError = ($_.Exception.Message -replace "\\r?\\n"," ")
