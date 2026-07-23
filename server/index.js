@@ -259,8 +259,12 @@ app.post("/api/shippers", express.json(), async (req, res) => {
 // attached, empty body, shown (not sent) for the user to review and send.
 
 // Find the LTA output folder (READY / PROBLEM / plain) and its signed PDFs.
+// Paths are ABSOLUTE (path.resolve): config.directories.signedLtas can be
+// relative ("./outputs"), and Outlook's Attachments.Add resolves a relative
+// path against its own working dir — not ours — so it fails with "path does
+// not exist". Absolute paths are the only reliable input to COM/PowerShell.
 const findLtaPdfs = async (ltaRef) => {
-  const base = config.directories.signedLtas;
+  const base = path.resolve(config.directories.signedLtas);
   for (const suffix of [" READY", " PROBLEM", ""]) {
     const folder = path.join(base, `LTA N° ${ltaRef}${suffix}`);
     if (!(await fs.pathExists(folder))) continue;
@@ -272,7 +276,7 @@ const findLtaPdfs = async (ltaRef) => {
         const nb = Number(b.match(/DUM (\d+)/)?.[1] ?? 0);
         return na - nb;
       })
-      .map((n) => path.join(folder, n));
+      .map((n) => path.resolve(folder, n));
     if (pdfs.length) return { folder, pdfs };
   }
   return { folder: null, pdfs: [] };

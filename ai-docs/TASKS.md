@@ -4,9 +4,13 @@
 
 ## Recently Completed
 
-### ✅ Outlook auto-attach "path not found" fixed — UTF-16LE temp script (2026-07-23)
+### ✅ Outlook auto-attach "path not found" fixed — ABSOLUTE paths (2026-07-23)
 
-The COM path failed with `Ce chemin d'accès n'existe pas` because the `°` in `LTA N° …` paths was corrupted when the temp `.ps1` (UTF-8 + literal BOM) was read on the machine's code page. Now written as **UTF-16LE + BOM** (`utf16le`), which Windows PowerShell reads natively. Verified `ATTACHED=3` / `METHOD=com` against a real `N°` folder. Classic Outlook (non-elevated) now auto-attaches; clipboard/Ctrl+V remains the new-Outlook-only fallback. Endpoint also returns `comErr`/`elevated` for diagnostics. See PROGRESS.md.
+The COM path failed with `Ce chemin d'accès n'existe pas` because `findLtaPdfs` handed Outlook **relative** paths (`config.directories.signedLtas` = `./outputs`), and `Attachments.Add` resolves relative paths against its own dir. Now returns **absolute** paths (`path.resolve`). Verified `ATTACHED=3` / `METHOD=com` against the real `157-55633583` folder. (The `°` was a red herring — plain U+00B0, never corrupted; UTF-16LE temp-script write kept as defensive hardening.) Classic Outlook (non-elevated) now auto-attaches. See PROGRESS.md.
+
+### ⚠️ App leaves stale API servers on port 3001 (follow-up)
+
+`electron/main.js` spawns `node server/index.js` with no hot-reload and doesn't reliably kill it on exit (zombies seen 2 days old). This repeatedly caused "fixed but still failing" because the app talked to an old server. **Fix to do:** free port 3001 (kill any listener) before `startApiServer` spawns its own.
 
 ### ✅ "Envoyer par email" — Outlook draft with PDFs attached (2026-07-22)
 

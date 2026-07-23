@@ -4,15 +4,19 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
-## 2026-07-23 — Fix: Outlook auto-attach failed with "path not found" (the "°" encoding)
+## 2026-07-23 — Fix: Outlook auto-attach failed — RELATIVE paths (not encoding)
 
-**Problem:** On the real machine the "Envoyer par email" button always fell back to clipboard/Ctrl+V instead of auto-attaching. A diagnostic (surface the real COM error + elevation) revealed: **not** elevation (`Administrator: no`), but the COM exception `Ce chemin d'accès n'existe pas` ("the path does not exist"). Node found the PDFs fine (`count: 3`), but the `°` in the `LTA N° …` folder path was being corrupted in the Node → temp `.ps1` → PowerShell handoff, so `Attachments.Add` couldn't find the files. The temp script was written UTF-8 + a literal BOM, which was still misread on that machine's console code page.
+**Problem:** The "Envoyer par email" button always fell back to clipboard/Ctrl+V. A diagnostic (surface the real COM error + elevation) showed: **not** elevation (`Administrator: no`), but `Ce chemin d'accès n'existe pas` ("path does not exist") from `Attachments.Add`.
 
-**Solution (`server/index.js`):** write the temp `.ps1` as **UTF-16LE with a BOM** (`fs.writeFile(path, "﻿" + script, "utf16le")`) — the encoding Windows PowerShell reads natively — and drop the literal BOM from the template string. Also added a diagnostic: the endpoint now returns `comErr` + `elevated`, shown in the UI's clipboard-fallback alert.
+**Root cause (the real one):** `findLtaPdfs` built paths with `path.join(config.directories.signedLtas, …)`, and `signedLtas` is **`./outputs` (relative)**. So Outlook received relative paths like `outputs\LTA N° … \DUM 1 ….pdf`. `Test-Path` passed (PowerShell's cwd was the project root) so the guard let it through, but **`Outlook.Attachments.Add` resolves a relative path against its OWN working directory**, not ours — so it couldn't find the file and threw "path does not exist". A misleading French error that looked like an encoding problem but wasn't: the `°` is a plain U+00B0 and was never corrupted.
 
-**Verified:** replicated the endpoint's exact script + UTF-16LE write against a real `LTA N° …` folder → `ATTACHED=3`, `METHOD=com`. So on a machine with classic Outlook (non-elevated) the button now opens a draft with all PDFs attached automatically; the clipboard/Ctrl+V path remains the fallback only for new-Outlook-only machines.
+**Fix (`server/index.js`):** `findLtaPdfs` now returns **absolute** paths (`path.resolve(config.directories.signedLtas)` for the base and `path.resolve(folder, n)` per file). Proven against the real folder: `ATTACHED=3`, `METHOD=com`.
 
-**Files changed:** `server/index.js` (+ diagnostic surfaced in `src/App.jsx` from the previous step).
+**Also kept from the investigation** (defensive, not the fix): the temp `.ps1` is written **UTF-16LE + BOM** (the encoding Windows PowerShell reads natively), and the endpoint returns `comErr` + `elevated`, surfaced in the UI clipboard-fallback alert for future diagnosis.
+
+**Operational note:** the app spawns its API as plain `node server/index.js` with **no hot-reload**, and it sometimes leaves the old server alive on exit (zombies seen 2 days old). Twice this caused a "fixed but still failing" illusion because the app was talking to a stale server on port 3001. Killing the stale `node …/server/index.js` processes + a full relaunch is required to load server changes. **Follow-up worth doing:** have `electron/main.js` free port 3001 before spawning its own server.
+
+**Files changed:** `server/index.js` (+ diagnostic in `src/App.jsx`).
 
 ---
 
