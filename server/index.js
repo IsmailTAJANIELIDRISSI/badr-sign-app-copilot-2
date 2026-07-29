@@ -83,7 +83,7 @@ app.get("/api/lta-files", async (_req, res) => {
   res.json(
     parsed.map((item) => ({
       fileName: item.fileName,
-      filePath: item.filePath,
+      filePath: path.resolve(item.filePath),
       ltaRef: item.ltaRef,
       dumsCount: item.dums.length,
       totalDums: item.totalDums,
@@ -621,6 +621,88 @@ try {
     );
   } catch (error) {
     logger.error({ refs, error: error.message }, "fetch-xlsx error");
+    res.status(500).json({ ok: false, reason: error.message });
+  }
+});
+
+// ── Clean / reset: remove DUM inputs + ARCHIVE the signed outputs ───────────
+// Deletes the Excel input(s) from the dums folder and MOVES each signed "…READY"
+// LTA folder from outputs into the archive (`outputs/deja signé et envoyé`, i.e.
+// C:\sign\outputs\deja signé et envoyé on the prod machine) instead of deleting
+// it — nothing signed is lost. Body: {} cleans ALL; { fileName?, ltaRef? } cleans
+// just that one LTA. Blocked while a signing job is running.
+const ARCHIVE_SUBDIR = "deja signé et envoyé";
+
+app.post("/api/lta/clean", async (req, res) => {
+  try {
+    const active = [...state.jobs.values()].some((j) => j.status === "running");
+    if (active) {
+      res.status(409).json({
+        ok: false,
+        reason: "Un traitement est en cours — impossible de nettoyer.",
+      });
+      return;
+    }
+    const { fileName, ltaRef } = req.body || {};
+    const dumsDir = path.resolve(config.directories.dums);
+    const outDir = path.resolve(config.directories.outputs);
+    const archive = process.env.ARCHIVE_DIR
+      ? path.resolve(process.env.ARCHIVE_DIR)
+      : path.join(outDir, ARCHIVE_SUBDIR);
+    await fs.ensureDir(archive);
+
+    let dumsRemoved = 0;
+    const movedFolders = [];
+
+    // Move a single "LTA N° <ref> READY" folder into the archive (overwrite an
+    // older archived copy of the same LTA).
+    const archiveReady = async (ref) => {
+      const folder = path.join(outDir, `LTA N° ${ref} READY`);
+      if (!(await fs.pathExists(folder))) return;
+      const target = path.join(archive, path.basename(folder));
+      await fs.remove(target).catch(() => {});
+      await fs.move(folder, target, { overwrite: true });
+      movedFolders.push(path.basename(folder));
+    };
+
+    if (fileName || ltaRef) {
+      // ── Single LTA ──
+      if (fileName) {
+        const full = path.join(dumsDir, path.basename(fileName));
+        if (await fs.pathExists(full)) {
+          await fs.remove(full);
+          dumsRemoved++;
+        }
+      }
+      if (ltaRef) await archiveReady(ltaRef);
+    } else {
+      // ── All ──
+      for (const name of await fs.readdir(dumsDir).catch(() => [])) {
+        const full = path.join(dumsDir, name);
+        const st = await fs.stat(full).catch(() => null);
+        if (st?.isFile() && allowedExcel.has(path.extname(name).toLowerCase())) {
+          await fs.remove(full);
+          dumsRemoved++;
+        }
+      }
+      for (const name of await fs.readdir(outDir).catch(() => [])) {
+        if (name === ARCHIVE_SUBDIR || !/ READY$/.test(name)) continue;
+        const src = path.join(outDir, name);
+        const st = await fs.stat(src).catch(() => null);
+        if (!st?.isDirectory()) continue;
+        const target = path.join(archive, name);
+        await fs.remove(target).catch(() => {});
+        await fs.move(src, target, { overwrite: true });
+        movedFolders.push(name);
+      }
+    }
+    logger.info(
+      { scope: fileName || ltaRef ? "one" : "all", dumsRemoved, moved: movedFolders.length },
+      "clean done",
+    );
+    res.json({ ok: true, dumsRemoved, movedFolders, archive });
+  } catch (error) {
+    logger.error({ error: error.message }, "clean failed");
     res.status(500).json({ ok: false, reason: error.message });
   }
 });

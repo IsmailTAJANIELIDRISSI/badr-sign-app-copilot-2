@@ -4,6 +4,32 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-29 — Feature: open .xlsx in Excel from the app (LTAs + Import tabs)
+
+**Goal:** let the user open Excel files directly from the app instead of hunting in the folder.
+
+**Electron (`electron/main.js`, `electron/preload.js`):** two new IPC handlers — `open-file` (`shell.openPath` a given path → opens in Excel) and `pick-xlsx` (`dialog.showOpenDialog` filtered to xlsx/xls/xlsm, defaulting to the DUMs folder, then `shell.openPath` the choice). Exposed on `window.electronAPI` as `openFile(path)` and `pickAndOpenXlsx(defaultPath)`. (Main-process change → needs a full app relaunch, not just server reload.)
+
+**Backend (`server/index.js`):** `/api/lta-files` now returns `filePath` as an **absolute** path (`path.resolve`) so `shell.openPath` works regardless of cwd.
+
+**Frontend (`src/App.jsx`):** `openXlsx(filePath)` and `pickXlsx()` helpers. Buttons: **📊 Ouvrir un Excel** (native picker → open any xlsx) in the **LTAs** toolbar and the **Import** tab; plus a per-card **📊 Ouvrir l'Excel** that opens that LTA's input file. All gated on `isElectron`.
+
+**Files changed:** `electron/main.js`, `electron/preload.js`, `server/index.js`, `src/App.jsx`.
+
+---
+
+## 2026-07-29 — Feature: "Nettoyer" — delete DUM inputs, ARCHIVE signed outputs (all + per-LTA)
+
+**Goal:** after signing a day's LTAs, the user had to hand-delete input `.xlsx` and the signed folders before the next batch. One-click reset — but signed outputs must be **preserved**, not deleted.
+
+**Backend (`server/index.js`):** `POST /api/lta/clean`. Body `{}` = clean ALL; `{ fileName?, ltaRef? }` = one LTA. It **deletes** the Excel input(s) from `config.directories.dums` and **moves** each `LTA N° <ref> READY` folder from outputs into the archive `outputs/deja signé et envoyé` (= `C:\sign\outputs\deja signé et envoyé` on prod; override via env `ARCHIVE_DIR`) — nothing signed is deleted. `PROBLEM`/non-READY folders and non-Excel files are left untouched. Returns `{ dumsRemoved, movedFolders[], archive }`. Refuses 409 while a job is `running`. Verified in temp dirs for both scopes: READY moved to archive, PROBLEM stays, inputs removed, note.txt kept.
+
+**Frontend (`src/App.jsx`):** `cleanLtas(item?)` — `item` omitted → all, else that one. Red **🗑 Nettoyer** in the top header bar (global) + a small **🗑** on each LTA card (hidden while that LTA is signing / in order mode). `window.confirm()` per scope, then `refresh()` + reports `dumsRemoved` / archived count.
+
+**Files changed:** `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-07-29 — Import tab: match by ".xlsx + LTA Complet", not by sender
 
 **Problem:** the sender filter (`== tajanielidrissi.ismail@gmail.com`) matched nothing on the real mailbox (`savedCount: 0`). DEBUG output (added this session) showed why: in the target inbox the completion email arrives as a colleague's **forward** (`TR: [BLOCAGE] LTA Complet …`, sender `nouhaila.orfane@…`), not directly from the gmail — so the sender check rejected the very email that carries the `.xlsx`. The original from the gmail is often also present (duplicate).

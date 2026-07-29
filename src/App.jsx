@@ -78,6 +78,7 @@ function App() {
   const [importing, setImporting] = useState(false);
   const [importResults, setImportResults] = useState(null);
   const [importDebug, setImportDebug] = useState([]);
+  const [cleaning, setCleaning] = useState(false);
 
   // Parse the textarea into a clean, de-duplicated list of refs. Accepts refs
   // separated by newlines, commas, semicolons or spaces.
@@ -119,11 +120,73 @@ function App() {
     }
   };
 
+  // Clean the DUM inputs and ARCHIVE the signed "…READY" folders (moved to
+  // outputs/deja signé et envoyé, not deleted). `item` omitted → clean ALL;
+  // otherwise just that one LTA. Guarded by confirm() and blocked mid-job.
+  const cleanLtas = async (item) => {
+    if (running) {
+      alert("Un traitement est en cours — impossible de nettoyer maintenant.");
+      return;
+    }
+    const ok = window.confirm(
+      item
+        ? `Supprimer le LTA ${item.ltaRef} ?\n\n` +
+            `• son fichier .xlsx est supprimé du dossier DUMs\n` +
+            `• son dossier signé (READY) est déplacé vers « deja signé et envoyé »\n\n` +
+            `Continuer ?`
+        : "Nettoyer / Supprimer tous les LTA ?\n\n" +
+            "• tous les fichiers .xlsx sont supprimés du dossier DUMs\n" +
+            "• tous les dossiers signés (READY) sont déplacés vers « deja signé et envoyé »\n\n" +
+            "Continuer ?",
+    );
+    if (!ok) return;
+    setCleaning(true);
+    try {
+      const r = await fetch("/api/lta/clean", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          item ? { fileName: item.fileName, ltaRef: item.ltaRef } : {},
+        ),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        setImportResults(null);
+        setImportDebug([]);
+        await refresh();
+        alert(
+          `Nettoyage terminé.\n\n` +
+            `DUMs supprimés : ${data.dumsRemoved}\n` +
+            `Dossiers archivés : ${data.movedFolders?.length ?? 0}`,
+        );
+      } else {
+        alert(data.reason || "Échec du nettoyage.");
+      }
+    } catch (e) {
+      alert(`Échec du nettoyage : ${e.message}`);
+    } finally {
+      setCleaning(false);
+    }
+  };
+
   const copySubject = async (item) => {
     if (await copyToClipboard(mawbSubject(item))) {
       setCopiedSubject(item.fileName);
       setTimeout(() => setCopiedSubject(""), 1600);
     }
+  };
+
+  // Open a specific LTA's .xlsx in Excel.
+  const openXlsx = async (filePath) => {
+    if (!isElectron || !filePath) return;
+    const ok = await window.electronAPI.openFile(filePath);
+    if (!ok) alert("Impossible d'ouvrir le fichier Excel.");
+  };
+
+  // Pick ANY .xlsx via a native dialog and open it (defaults to the DUMs folder).
+  const pickXlsx = async () => {
+    if (!isElectron) return;
+    await window.electronAPI.pickAndOpenXlsx(dumsFolder);
   };
 
   // Open an Outlook draft with the LTA's signed PDFs attached (backend uses
@@ -454,6 +517,14 @@ function App() {
             <button onClick={refresh} className={btnGhost} disabled={loading}>
               {loading ? "Refreshing…" : "↻ Refresh"}
             </button>
+            <button
+              onClick={() => cleanLtas()}
+              disabled={cleaning || running}
+              title="Nettoyer tous les LTA (supprime les .xlsx, archive les dossiers signés)"
+              className={`${btn} border border-coral/40 bg-coral/10 text-coral hover:bg-coral/20`}
+            >
+              {cleaning ? "Nettoyage…" : "🗑 Nettoyer"}
+            </button>
             {isElectron && outputsFolder && (
               <button
                 onClick={() => window.electronAPI.openFolder(outputsFolder)}
@@ -561,6 +632,15 @@ function App() {
                 >
                   {orderMode ? "✓ Done reordering" : "⇅ Priority order"}
                 </button>
+                {isElectron && (
+                  <button
+                    onClick={pickXlsx}
+                    className={btnGhost}
+                    title="Ouvrir n'importe quel fichier Excel"
+                  >
+                    📊 Ouvrir un Excel
+                  </button>
+                )}
                 <span className="ml-auto text-xs text-steel">
                   {selectedFileNames.length} of {orderedItems.length} selected
                 </span>
@@ -663,6 +743,17 @@ function App() {
                           <span className="rounded-full bg-coral/15 px-2.5 py-0.5 text-[11px] font-bold text-coral">
                             {item.dumsCount} DUM
                           </span>
+                          {!orderMode && !isActive && (
+                            <button
+                              type="button"
+                              onClick={() => cleanLtas(item)}
+                              disabled={cleaning || running}
+                              title="Supprimer ce LTA (.xlsx supprimé, dossier signé archivé)"
+                              className="rounded-full p-1 text-sm leading-none text-coral/60 transition hover:bg-coral/10 hover:text-coral disabled:opacity-40"
+                            >
+                              🗑
+                            </button>
+                          )}
                         </div>
                       </div>
 
@@ -727,6 +818,17 @@ function App() {
                                   ? "Échec — réessayer"
                                   : "Envoyer par email"}
                           </button>
+
+                          {isElectron && item.filePath && (
+                            <button
+                              type="button"
+                              onClick={() => openXlsx(item.filePath)}
+                              title="Ouvrir ce fichier .xlsx dans Excel"
+                              className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg border border-emerald-600/30 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                            >
+                              📊 Ouvrir l'Excel
+                            </button>
+                          )}
 
                           <label className="mt-3 block text-[10px] font-bold uppercase tracking-wider text-steel">
                             Expected shipper
@@ -855,6 +957,15 @@ function App() {
                   >
                     {importing ? "⏳ Recherche…" : "Confirmer"}
                   </button>
+                  {isElectron && (
+                    <button
+                      onClick={pickXlsx}
+                      className={btnGhost}
+                      title="Ouvrir n'importe quel fichier Excel"
+                    >
+                      📊 Ouvrir un Excel
+                    </button>
+                  )}
                   <span className="text-xs text-steel">
                     {parseRefs(importRefs).length} référence
                     {parseRefs(importRefs).length > 1 ? "s" : ""}

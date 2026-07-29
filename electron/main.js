@@ -255,6 +255,48 @@ ipcMain.handle("open-folder", async (_event, folderPath) => {
   }
 });
 
+// Open a single file in its default app (e.g. an .xlsx in Excel).
+ipcMain.handle("open-file", async (_event, filePath) => {
+  try {
+    if (!filePath) return false;
+    const err = await shell.openPath(path.resolve(filePath));
+    if (err) {
+      console.error("open-file failed:", err);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("Error opening file:", error);
+    return false;
+  }
+});
+
+// Let the user pick ANY .xlsx and open it in Excel. Returns the opened path or null.
+ipcMain.handle("pick-xlsx", async (_event, defaultPath) => {
+  try {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: "Ouvrir un fichier Excel",
+      defaultPath: defaultPath ? path.resolve(defaultPath) : undefined,
+      properties: ["openFile"],
+      filters: [
+        { name: "Excel", extensions: ["xlsx", "xls", "xlsm"] },
+        { name: "Tous les fichiers", extensions: ["*"] },
+      ],
+    });
+    if (result.canceled || !result.filePaths?.length) return null;
+    const chosen = result.filePaths[0];
+    const err = await shell.openPath(chosen);
+    if (err) {
+      console.error("pick-xlsx openPath failed:", err);
+      return null;
+    }
+    return chosen;
+  } catch (error) {
+    console.error("Error picking file:", error);
+    return null;
+  }
+});
+
 const setupMenu = () => {
   const template = [
     {
