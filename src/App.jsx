@@ -73,6 +73,49 @@ function App() {
   // fileName -> "sending" | "sent" | "error"  for the Outlook button state.
   const [emailState, setEmailState] = useState({});
 
+  // Import tab: pull DUM .xlsx from the Outlook inbox by LTA ref.
+  const [importRefs, setImportRefs] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [importResults, setImportResults] = useState(null);
+
+  // Parse the textarea into a clean, de-duplicated list of refs. Accepts refs
+  // separated by newlines, commas, semicolons or spaces.
+  const parseRefs = (text) => [
+    ...new Set(
+      String(text)
+        .split(/[\s,;]+/)
+        .map((r) => r.trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  const fetchXlsxFromInbox = async () => {
+    const refs = parseRefs(importRefs);
+    if (!refs.length) return;
+    setImporting(true);
+    setImportResults(null);
+    try {
+      const r = await fetch("/api/lta/fetch-xlsx", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refs }),
+      });
+      const data = await r.json();
+      if (r.ok && data.ok) {
+        setImportResults(data.results || []);
+        if (data.savedCount > 0) refresh(); // new files → reload the LTA list
+      } else {
+        setImportResults([
+          { ref: "—", status: "error", detail: data.reason || "Échec." },
+        ]);
+      }
+    } catch (e) {
+      setImportResults([{ ref: "—", status: "error", detail: e.message }]);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const copySubject = async (item) => {
     if (await copyToClipboard(mawbSubject(item))) {
       setCopiedSubject(item.fileName);
@@ -458,6 +501,7 @@ function App() {
         <div className="mx-auto flex max-w-[1600px] gap-1 px-5">
           {[
             { id: "ltas", label: "LTAs", badge: orderedItems.length || null },
+            { id: "import", label: "Import", badge: null },
             { id: "activity", label: "Activity", badge: null },
           ].map((t) => (
             <button
@@ -765,6 +809,110 @@ function App() {
                 <p className="mt-6 break-all font-mono text-[11px] text-steel/70">
                   📂 {dumsFolder}
                 </p>
+              )}
+            </div>
+          </div>
+        ) : tab === "import" ? (
+          /* ── Import tab ────────────────────────────────────────────────── */
+          <div className="h-full overflow-auto">
+            <div className="mx-auto max-w-[900px] px-5 py-6">
+              <h2 className="font-display text-lg font-semibold text-ink">
+                Importer les DUMs depuis Outlook
+              </h2>
+              <p className="mt-1 text-sm text-steel">
+                Saisissez un ou plusieurs numéros de LTA. L'app cherche dans la
+                boîte de réception Outlook les emails envoyés par{" "}
+                <span className="font-semibold text-ink">
+                  tajanielidrissi.ismail@gmail.com
+                </span>{" "}
+                dont l'objet contient la référence, puis enregistre le fichier
+                .xlsx joint dans le dossier des DUMs.
+              </p>
+
+              <div className="mt-4 rounded-2xl border border-ink/10 bg-white/70 p-4">
+                <label className="text-xs font-bold uppercase tracking-wider text-steel">
+                  Références LTA
+                </label>
+                <textarea
+                  value={importRefs}
+                  onChange={(e) => setImportRefs(e.target.value)}
+                  placeholder={"157-55633583\n123-12344556"}
+                  rows={6}
+                  spellCheck={false}
+                  className="mt-2 w-full resize-y rounded-xl border border-ink/15 bg-white/80 px-3 py-2 font-mono text-sm text-ink outline-none focus:border-ink/40"
+                />
+                <div className="mt-3 flex items-center gap-3">
+                  <button
+                    onClick={fetchXlsxFromInbox}
+                    disabled={importing || parseRefs(importRefs).length === 0}
+                    className={`${btn} bg-ink text-white hover:bg-ink/90`}
+                  >
+                    {importing ? "⏳ Recherche…" : "Confirmer"}
+                  </button>
+                  <span className="text-xs text-steel">
+                    {parseRefs(importRefs).length} référence
+                    {parseRefs(importRefs).length > 1 ? "s" : ""}
+                  </span>
+                  {dumsFolder && (
+                    <span className="ml-auto truncate text-xs text-steel">
+                      📂 {dumsFolder}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {importResults && (
+                <div className="mt-4 space-y-2">
+                  {importResults.map((res, i) => {
+                    const tone =
+                      res.status === "saved"
+                        ? {
+                            dot: "bg-emerald-500",
+                            label: "Enregistré",
+                            cls: "text-emerald-600",
+                          }
+                        : res.status === "no_xlsx"
+                          ? {
+                              dot: "bg-amber-500",
+                              label: "Sans .xlsx",
+                              cls: "text-amber-600",
+                            }
+                          : res.status === "error"
+                            ? {
+                                dot: "bg-coral",
+                                label: "Erreur",
+                                cls: "text-coral",
+                              }
+                            : {
+                                dot: "bg-steel",
+                                label: "Introuvable",
+                                cls: "text-steel",
+                              };
+                    return (
+                      <div
+                        key={`${res.ref}-${i}`}
+                        className="flex items-start gap-3 rounded-xl border border-ink/10 bg-white/70 px-4 py-2.5"
+                      >
+                        <span
+                          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${tone.dot}`}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="font-mono text-sm font-semibold text-ink">
+                            {res.ref}
+                          </p>
+                          <p className="break-words text-xs text-steel">
+                            {res.detail}
+                          </p>
+                        </div>
+                        <span
+                          className={`shrink-0 text-xs font-bold ${tone.cls}`}
+                        >
+                          {tone.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </div>
           </div>

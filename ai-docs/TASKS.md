@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ "Import" tab — fetch DUM .xlsx from Outlook inbox by ref (2026-07-23)
+
+New Import tab: paste LTA refs → **Confirmer** → `POST /api/lta/fetch-xlsx` runs Outlook COM to search the default Inbox for mail from `tajanielidrissi.ismail@gmail.com` (override via `INBOX_SENDER_EMAIL`) whose subject contains the ref, and saves the `.xlsx` attachment into the dums folder (auto-refreshes the LTA list). Classic-Outlook-only, no SMTP/Graph. Verified COM Inbox read (`items=409`) + PS/JS syntax; the "saved" path needs validation on the real recipient machine. See PROGRESS.md.
+
 ### ✅ Outlook auto-attach "path not found" fixed — ABSOLUTE paths (2026-07-23)
 
 The COM path failed with `Ce chemin d'accès n'existe pas` because `findLtaPdfs` handed Outlook **relative** paths (`config.directories.signedLtas` = `./outputs`), and `Attachments.Add` resolves relative paths against its own dir. Now returns **absolute** paths (`path.resolve`). Verified `ATTACHED=3` / `METHOD=com` against the real `157-55633583` folder. (The `°` was a red herring — plain U+00B0, never corrupted; UTF-16LE temp-script write kept as defensive hardening.) Classic Outlook (non-elevated) now auto-attaches. See PROGRESS.md.

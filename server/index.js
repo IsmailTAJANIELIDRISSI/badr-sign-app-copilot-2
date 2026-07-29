@@ -421,6 +421,134 @@ try {
   }
 });
 
+// ── Fetch DUM .xlsx from the Outlook inbox by LTA ref ──────────────────────
+// Classic-Outlook-only (COM), no SMTP/IMAP/Graph. For each ref, search the
+// default Inbox for a mail whose sender SMTP == INBOX_SENDER and whose subject
+// contains the ref, then save each .xlsx attachment into the dums input folder
+// so the app auto-detects the LTA. Paths are absolute (same reason as the email
+// feature — Outlook resolves relative paths against its own dir).
+const INBOX_SENDER =
+  process.env.INBOX_SENDER_EMAIL || "tajanielidrissi.ismail@gmail.com";
+
+app.post("/api/lta/fetch-xlsx", async (req, res) => {
+  const refs = Array.isArray(req.body?.refs)
+    ? [...new Set(req.body.refs.map((r) => String(r).trim()).filter(Boolean))]
+    : [];
+  try {
+    if (!refs.length) {
+      res.status(400).json({ ok: false, reason: "No LTA refs provided." });
+      return;
+    }
+    const dest = path.resolve(config.directories.dums);
+    await fs.ensureDir(dest);
+
+    const refsArray = `@(${refs.map(psq).join(",")})`;
+    // PR_SENDER_SMTP_ADDRESS — the reliable SMTP of the sender (gmail), even
+    // when Outlook stores an Exchange DN in SenderEmailAddress. [char]34/39 are
+    // " and ' so the DASL filter string doesn't fight the surrounding quotes.
+    const script = `$ErrorActionPreference = 'Stop'
+$dest = ${psq(dest)}
+$sender = ${psq(INBOX_SENDER)}.ToLower()
+$refs = ${refsArray}
+$PR_SMTP = 'http://schemas.microsoft.com/mapi/proptag/0x5D01001F'
+try {
+  $ol = New-Object -ComObject Outlook.Application
+  $ns = $ol.GetNamespace('MAPI')
+  $inbox = $ns.GetDefaultFolder(6)
+  foreach ($ref in $refs) {
+    $safe = $ref -replace "'","''"
+    $filter = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' LIKE ' + [char]39 + '%' + $safe + '%' + [char]39
+    try { $items = $inbox.Items.Restrict($filter) } catch { $items = $inbox.Items }
+    try { $items.Sort('[ReceivedTime]', $true) } catch {}
+    $found = $false
+    foreach ($m in $items) {
+      try { if ($m.Class -ne 43) { continue } } catch { continue }
+      try { if ($m.Subject -notlike ('*' + $ref + '*')) { continue } } catch { continue }
+      $smtp = ''
+      try { $smtp = $m.PropertyAccessor.GetProperty($PR_SMTP) } catch {}
+      if (-not $smtp) { try { $smtp = $m.SenderEmailAddress } catch {} }
+      if (-not $smtp -or $smtp.ToLower() -ne $sender) { continue }
+      $saved = @()
+      foreach ($att in $m.Attachments) {
+        if ($att.FileName -match '\\.xlsx$') {
+          $att.SaveAsFile((Join-Path $dest $att.FileName))
+          $saved += $att.FileName
+        }
+      }
+      if ($saved.Count -gt 0) {
+        Write-Output ('RESULT=' + $ref + '|saved|' + ($saved -join ' ; '))
+      } else {
+        Write-Output ('RESULT=' + $ref + '|no_xlsx|Email trouve mais aucune piece jointe .xlsx')
+      }
+      $found = $true
+      break
+    }
+    if (-not $found) { Write-Output ('RESULT=' + $ref + '|not_found|Aucun email correspondant') }
+  }
+  Write-Output 'DONE=ok'
+} catch {
+  Write-Output ('FATAL=' + ($_.Exception.Message -replace "\\r?\\n"," "))
+}
+`;
+
+    const os = await import("os");
+    const scriptPath = path.join(os.tmpdir(), `badr-fetch-${Date.now()}.ps1`);
+    // UTF-16LE + BOM: the encoding Windows PowerShell reads natively, so the
+    // dest path and any accented attachment names survive intact.
+    await fs.writeFile(scriptPath, "﻿" + script, "utf16le");
+
+    const { execFile } = await import("child_process");
+    execFile(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-STA",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        scriptPath,
+      ],
+      { timeout: 90000, windowsHide: true },
+      (err, stdout, stderr) => {
+        fs.remove(scriptPath).catch(() => {});
+        const out = String(stdout || "");
+        const fatal = out.match(/FATAL=(.*)/)?.[1]?.trim();
+        if (fatal || (err && !out.includes("RESULT=") && !out.includes("DONE="))) {
+          const reason = fatal || stderr || err?.message || "Outlook COM failed";
+          logger.warn({ refs, reason }, "fetch-xlsx failed");
+          res.status(500).json({
+            ok: false,
+            reason:
+              "Impossible de lire la boîte Outlook (Outlook classique requis). " +
+              String(reason).slice(0, 300),
+          });
+          return;
+        }
+        const results = [];
+        const seen = new Set();
+        for (const line of out.split(/\r?\n/)) {
+          const mm = line.match(/^RESULT=(.+?)\|([a-z_]+)\|(.*)$/i);
+          if (mm) {
+            results.push({ ref: mm[1], status: mm[2], detail: mm[3] });
+            seen.add(mm[1]);
+          }
+        }
+        for (const ref of refs) {
+          if (!seen.has(ref))
+            results.push({ ref, status: "not_found", detail: "Aucune réponse" });
+        }
+        const savedCount = results.filter((r) => r.status === "saved").length;
+        logger.info({ count: refs.length, savedCount }, "fetch-xlsx done");
+        res.json({ ok: true, dest, savedCount, results });
+      },
+    );
+  } catch (error) {
+    logger.error({ refs, error: error.message }, "fetch-xlsx error");
+    res.status(500).json({ ok: false, reason: error.message });
+  }
+});
+
 app.listen(config.port, () => {
   logger.info(
     `API listening on http://localhost:${config.port} | Dums folder: ${config.directories.dums}`,

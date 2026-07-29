@@ -4,6 +4,20 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-23 — Feature: "Import" tab — pull DUM .xlsx from Outlook inbox by ref
+
+**Goal:** a tab where the user pastes one or more LTA refs (e.g. `123-12344556`) and clicks **Confirmer**; the app searches the Outlook **inbox** for emails sent by `tajanielidrissi.ismail@gmail.com` whose subject contains the ref, downloads the attached `.xlsx`, and saves it into the dums folder — **no SMTP / IMAP / Graph**, just the local classic-Outlook profile via COM.
+
+**Backend (`server/index.js`):** new `POST /api/lta/fetch-xlsx` (`{ refs: [...] }`). PowerShell COM opens `Outlook.Application` → MAPI → `GetDefaultFolder(6)` (Inbox). Per ref: a DASL `Restrict` on `urn:schemas:httpmail:subject LIKE '%ref%'`, then matches the sender via `PR_SENDER_SMTP_ADDRESS` (0x5D01001F, falls back to `SenderEmailAddress`) against `INBOX_SENDER` (env `INBOX_SENDER_EMAIL`, default the gmail), and `SaveAsFile`s each `.xlsx` into `path.resolve(config.directories.dums)` (absolute — same Outlook-relative-path lesson). Emits `RESULT=<ref>|saved|no_xlsx|not_found|<detail>` lines parsed into a JSON `results[]`. Script written UTF-16LE+BOM; classic Outlook required (COM), returns a clear FR error otherwise.
+
+**Frontend (`src/App.jsx`):** new **Import** tab — textarea (refs split on whitespace/`,`/`;`, de-duped), **Confirmer** button → `fetchXlsxFromInbox`, per-ref result rows with status badges (Enregistré / Sans .xlsx / Introuvable / Erreur). On any save it calls `refresh()` so the new LTAs appear in the LTAs tab.
+
+**Verified:** JS `node --check` OK; generated PowerShell `PS_SYNTAX_OK`; live COM read on this machine returned `INBOX_OK items=409` (Inbox reachable). "saved" path not exercised here (dev account isn't the recipient) — validate on the real machine.
+
+**Files changed:** `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-07-23 — Fix: Outlook auto-attach failed — RELATIVE paths (not encoding)
 
 **Problem:** The "Envoyer par email" button always fell back to clipboard/Ctrl+V. A diagnostic (surface the real COM error + elevation) showed: **not** elevation (`Administrator: no`), but `Ce chemin d'accès n'existe pas` ("path does not exist") from `Attachments.Add`.
