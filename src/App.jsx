@@ -77,6 +77,7 @@ function App() {
   const [importRefs, setImportRefs] = useState("");
   const [importing, setImporting] = useState(false);
   const [importResults, setImportResults] = useState(null);
+  const [importDebug, setImportDebug] = useState([]);
 
   // Parse the textarea into a clean, de-duplicated list of refs. Accepts refs
   // separated by newlines, commas, semicolons or spaces.
@@ -94,6 +95,7 @@ function App() {
     if (!refs.length) return;
     setImporting(true);
     setImportResults(null);
+    setImportDebug([]);
     try {
       const r = await fetch("/api/lta/fetch-xlsx", {
         method: "POST",
@@ -101,6 +103,7 @@ function App() {
         body: JSON.stringify({ refs }),
       });
       const data = await r.json();
+      setImportDebug(data.debug || []);
       if (r.ok && data.ok) {
         setImportResults(data.results || []);
         if (data.savedCount > 0) refresh(); // new files → reload the LTA list
@@ -915,6 +918,17 @@ function App() {
                     );
                   })}
                 </div>
+              )}
+
+              {importDebug.length > 0 && (
+                <details className="mt-4 rounded-2xl border border-ink/10 bg-white/60 px-4 py-3">
+                  <summary className="cursor-pointer text-xs font-bold uppercase tracking-wider text-steel">
+                    Détails du diagnostic ({importDebug.length})
+                  </summary>
+                  <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-steel">
+                    {importDebug.join("\n")}
+                  </pre>
+                </details>
               )}
             </div>
           </div>

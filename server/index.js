@@ -460,37 +460,60 @@ $PR_SMTP = 'http://schemas.microsoft.com/mapi/proptag/0x5D01001F'
 try {
   $ol = New-Object -ComObject Outlook.Application
   $ns = $ol.GetNamespace('MAPI')
-  # Pick the Inbox of the account whose SMTP matches $acctMatch (equals or
-  # ends-with), not the default account.
+  Write-Output 'DEBUG=Outlook COM connected'
+  # List every account so we can see whether the medafrica one exists.
+  $accts = @()
+  foreach ($a in $ns.Accounts) { try { if ($a.SmtpAddress) { $accts += $a.SmtpAddress } } catch {} }
+  Write-Output ('DEBUG=Accounts in profile: ' + ($accts -join ', '))
+  Write-Output ('DEBUG=Target account match: ' + $acctMatch + '  |  Target sender: ' + $sender)
+  # Pick the Inbox of the account whose SMTP matches $acctMatch (equals or ends-with).
   $store = $null
   foreach ($a in $ns.Accounts) {
     $sm = ''
     try { $sm = $a.SmtpAddress } catch {}
     if ($sm) {
-      $sm = $sm.ToLower()
-      if ($sm -eq $acctMatch -or $sm.EndsWith($acctMatch)) { $store = $a.DeliveryStore; break }
+      $sm2 = $sm.ToLower()
+      if ($sm2 -eq $acctMatch -or $sm2.EndsWith($acctMatch)) { $store = $a.DeliveryStore; Write-Output ('DEBUG=Matched account: ' + $sm); break }
     }
   }
   if ($store -eq $null) { throw ('Aucun compte Outlook ne correspond a ' + $acctMatch) }
   $inbox = $store.GetDefaultFolder(6)
+  Write-Output ('DEBUG=Inbox store=' + $inbox.Store.DisplayName + ' totalItems=' + $inbox.Items.Count)
   foreach ($ref in $refs) {
     $safe = $ref -replace "'","''"
     $filter = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' LIKE ' + [char]39 + '%' + $safe + '%' + [char]39
-    try { $items = $inbox.Items.Restrict($filter) } catch { $items = $inbox.Items }
+    $usedRestrict = $true
+    try { $items = $inbox.Items.Restrict($filter) } catch { $items = $inbox.Items; $usedRestrict = $false }
     try { $items.Sort('[ReceivedTime]', $true) } catch {}
+    $matchCount = 0
+    try { $matchCount = $items.Count } catch {}
+    Write-Output ('DEBUG=[' + $ref + '] subject-restrict matched=' + $matchCount + ' restrictUsed=' + $usedRestrict)
     $found = $false
+    $shown = 0
     foreach ($m in $items) {
       try { if ($m.Class -ne 43) { continue } } catch { continue }
-      try { if ($m.Subject -notlike ('*' + $ref + '*')) { continue } } catch { continue }
+      $subj = ''
+      try { $subj = $m.Subject } catch {}
+      if ($subj -notlike ('*' + $ref + '*')) { continue }
       $smtp = ''
       try { $smtp = $m.PropertyAccessor.GetProperty($PR_SMTP) } catch {}
       if (-not $smtp) { try { $smtp = $m.SenderEmailAddress } catch {} }
+      $attCount = 0
+      try { $attCount = $m.Attachments.Count } catch {}
+      if ($shown -lt 15) {
+        Write-Output ('DEBUG=[' + $ref + '] candidate sender=' + $smtp + ' atts=' + $attCount + ' subj=' + $subj)
+        $shown++
+      }
       if (-not $smtp -or $smtp.ToLower() -ne $sender) { continue }
       $saved = @()
       foreach ($att in $m.Attachments) {
-        if ($att.FileName -match '\\.xlsx$') {
-          $att.SaveAsFile((Join-Path $dest $att.FileName))
-          $saved += $att.FileName
+        $fn = ''
+        try { $fn = $att.FileName } catch {}
+        if ($fn -match '\\.xlsx$') {
+          $att.SaveAsFile((Join-Path $dest $fn))
+          $saved += $fn
+        } else {
+          Write-Output ('DEBUG=[' + $ref + '] attachment ignored (not .xlsx): ' + $fn)
         }
       }
       if ($saved.Count -gt 0) {
@@ -501,7 +524,7 @@ try {
       $found = $true
       break
     }
-    if (-not $found) { Write-Output ('RESULT=' + $ref + '|not_found|Aucun email correspondant') }
+    if (-not $found) { Write-Output ('RESULT=' + $ref + '|not_found|Aucun email de ' + $sender + ' avec ' + $ref + ' dans objet') }
   }
   Write-Output 'DONE=ok'
 } catch {
@@ -531,6 +554,17 @@ try {
       (err, stdout, stderr) => {
         fs.remove(scriptPath).catch(() => {});
         const out = String(stdout || "");
+        // Collect DEBUG lines and echo each into the log journal so the search
+        // path is visible (account list, inbox reached, per-ref match counts,
+        // candidate senders). Also returned to the UI for an inline detail view.
+        const debug = [];
+        for (const line of out.split(/\r?\n/)) {
+          const dm = line.match(/^DEBUG=(.*)$/);
+          if (dm) {
+            debug.push(dm[1]);
+            logger.info(`[fetch-xlsx] ${dm[1]}`);
+          }
+        }
         const fatal = out.match(/FATAL=(.*)/)?.[1]?.trim();
         if (fatal || (err && !out.includes("RESULT=") && !out.includes("DONE="))) {
           const reason = fatal || stderr || err?.message || "Outlook COM failed";
@@ -540,6 +574,7 @@ try {
             reason:
               "Impossible de lire la boîte Outlook (Outlook classique requis). " +
               String(reason).slice(0, 300),
+            debug,
           });
           return;
         }
@@ -558,7 +593,7 @@ try {
         }
         const savedCount = results.filter((r) => r.status === "saved").length;
         logger.info({ count: refs.length, savedCount }, "fetch-xlsx done");
-        res.json({ ok: true, dest, savedCount, results });
+        res.json({ ok: true, dest, savedCount, results, debug });
       },
     );
   } catch (error) {
