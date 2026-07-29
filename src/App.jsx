@@ -821,7 +821,9 @@ function App() {
               </h2>
               <p className="mt-1 text-sm text-steel">
                 Saisissez un ou plusieurs numéros de LTA. L'app cherche dans la
-                boîte de réception Outlook les emails envoyés par{" "}
+                boîte de réception Outlook du compte{" "}
+                <span className="font-semibold text-ink">medafrica-log.com</span>{" "}
+                les emails envoyés par{" "}
                 <span className="font-semibold text-ink">
                   tajanielidrissi.ismail@gmail.com
                 </span>{" "}

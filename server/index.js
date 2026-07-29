@@ -429,6 +429,11 @@ try {
 // feature — Outlook resolves relative paths against its own dir).
 const INBOX_SENDER =
   process.env.INBOX_SENDER_EMAIL || "tajanielidrissi.ismail@gmail.com";
+// Which Outlook account's Inbox to search. Matched against each account's SMTP
+// by exact-equals OR endsWith, so "@medafrica-log.com" targets that account on
+// any machine regardless of the exact local part. Override with a full address.
+const INBOX_ACCOUNT =
+  process.env.INBOX_ACCOUNT_EMAIL || "@medafrica-log.com";
 
 app.post("/api/lta/fetch-xlsx", async (req, res) => {
   const refs = Array.isArray(req.body?.refs)
@@ -449,12 +454,25 @@ app.post("/api/lta/fetch-xlsx", async (req, res) => {
     const script = `$ErrorActionPreference = 'Stop'
 $dest = ${psq(dest)}
 $sender = ${psq(INBOX_SENDER)}.ToLower()
+$acctMatch = ${psq(INBOX_ACCOUNT)}.ToLower()
 $refs = ${refsArray}
 $PR_SMTP = 'http://schemas.microsoft.com/mapi/proptag/0x5D01001F'
 try {
   $ol = New-Object -ComObject Outlook.Application
   $ns = $ol.GetNamespace('MAPI')
-  $inbox = $ns.GetDefaultFolder(6)
+  # Pick the Inbox of the account whose SMTP matches $acctMatch (equals or
+  # ends-with), not the default account.
+  $store = $null
+  foreach ($a in $ns.Accounts) {
+    $sm = ''
+    try { $sm = $a.SmtpAddress } catch {}
+    if ($sm) {
+      $sm = $sm.ToLower()
+      if ($sm -eq $acctMatch -or $sm.EndsWith($acctMatch)) { $store = $a.DeliveryStore; break }
+    }
+  }
+  if ($store -eq $null) { throw ('Aucun compte Outlook ne correspond a ' + $acctMatch) }
+  $inbox = $store.GetDefaultFolder(6)
   foreach ($ref in $refs) {
     $safe = $ref -replace "'","''"
     $filter = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' LIKE ' + [char]39 + '%' + $safe + '%' + [char]39
