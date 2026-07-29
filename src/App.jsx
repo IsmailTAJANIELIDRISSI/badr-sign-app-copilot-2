@@ -826,12 +826,13 @@ function App() {
                 Saisissez un ou plusieurs numéros de LTA. L'app cherche dans la
                 boîte de réception Outlook du compte{" "}
                 <span className="font-semibold text-ink">medafrica-log.com</span>{" "}
-                les emails envoyés par{" "}
-                <span className="font-semibold text-ink">
-                  tajanielidrissi.ismail@gmail.com
+                l'email dont l'objet contient la référence et{" "}
+                <span className="font-semibold text-ink">« LTA Complet »</span>,
+                puis enregistre le fichier{" "}
+                <span className="font-mono text-ink">
+                  generated_excel - &lt;ref&gt;.xlsx
                 </span>{" "}
-                dont l'objet contient la référence, puis enregistre le fichier
-                .xlsx joint dans le dossier des DUMs.
+                dans le dossier des DUMs.
               </p>
 
               <div className="mt-4 rounded-2xl border border-ink/10 bg-white/70 p-4">

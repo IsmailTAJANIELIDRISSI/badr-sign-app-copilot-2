@@ -4,6 +4,18 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-29 — Import tab: match by ".xlsx + LTA Complet", not by sender
+
+**Problem:** the sender filter (`== tajanielidrissi.ismail@gmail.com`) matched nothing on the real mailbox (`savedCount: 0`). DEBUG output (added this session) showed why: in the target inbox the completion email arrives as a colleague's **forward** (`TR: [BLOCAGE] LTA Complet …`, sender `nouhaila.orfane@…`), not directly from the gmail — so the sender check rejected the very email that carries the `.xlsx`. The original from the gmail is often also present (duplicate).
+
+**Fix (`server/index.js`):** dropped the sender **filter**. New rule per ref: subject contains the ref **AND** the keyword **"complet"** (env `INBOX_SUBJECT_KEYWORD`, default `complet`) **AND** the mail has an `.xlsx` attachment whose name contains the ref (`generated_excel - <ref>.xlsx`). Among qualifying mails it **prefers** the gmail original when present, else takes the most recent (the forward). Saves that ref-named `.xlsx`. Sender is now only a soft preference. Verified with a mock of the real candidates → chooses Ismail's original, saves `generated_excel - 157-55633642.xlsx`; falls back to the forward when the original is absent.
+
+**Also this session:** DEBUG instrumentation across every layer (accounts list, matched account, inbox reached + item count, per-ref subject-restrict count, per-candidate sender/xlsx/keyword, chosen mail). Emitted as `DEBUG=` lines → logged to the API journal (`[fetch-xlsx] …`) and returned in the response, shown in the Import tab under "Détails du diagnostic".
+
+**Files changed:** `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-07-23 — Feature: "Import" tab — pull DUM .xlsx from Outlook inbox by ref
 
 **Goal:** a tab where the user pastes one or more LTA refs (e.g. `123-12344556`) and clicks **Confirmer**; the app searches the Outlook **inbox** for emails sent by `tajanielidrissi.ismail@gmail.com` whose subject contains the ref, downloads the attached `.xlsx`, and saves it into the dums folder — **no SMTP / IMAP / Graph**, just the local classic-Outlook profile via COM.

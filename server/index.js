@@ -434,6 +434,13 @@ const INBOX_SENDER =
 // any machine regardless of the exact local part. Override with a full address.
 const INBOX_ACCOUNT =
   process.env.INBOX_ACCOUNT_EMAIL || "@medafrica-log.com";
+// The completion email's subject keyword. The right email (the one carrying the
+// generated .xlsx) always says "LTA Complet"; forwards keep it too. We match on
+// this instead of the sender, because in the target mailbox the email usually
+// arrives as a colleague's forward, not directly from the gmail.
+const SUBJECT_KEYWORD = (
+  process.env.INBOX_SUBJECT_KEYWORD || "complet"
+).toLowerCase();
 
 app.post("/api/lta/fetch-xlsx", async (req, res) => {
   const refs = Array.isArray(req.body?.refs)
@@ -455,6 +462,7 @@ app.post("/api/lta/fetch-xlsx", async (req, res) => {
 $dest = ${psq(dest)}
 $sender = ${psq(INBOX_SENDER)}.ToLower()
 $acctMatch = ${psq(INBOX_ACCOUNT)}.ToLower()
+$keyword = ${psq(SUBJECT_KEYWORD)}
 $refs = ${refsArray}
 $PR_SMTP = 'http://schemas.microsoft.com/mapi/proptag/0x5D01001F'
 try {
@@ -488,7 +496,12 @@ try {
     $matchCount = 0
     try { $matchCount = $items.Count } catch {}
     Write-Output ('DEBUG=[' + $ref + '] subject-restrict matched=' + $matchCount + ' restrictUsed=' + $usedRestrict)
-    $found = $false
+    # Selection rule: subject contains the ref AND the keyword ("complet") AND
+    # the mail carries an .xlsx whose name contains the ref. Sender is NOT a
+    # filter (the email often arrives as a colleague's forward) — but if Ismail's
+    # original copy is present we prefer it over a forward.
+    $best = $null
+    $bestGmail = $false
     $shown = 0
     foreach ($m in $items) {
       try { if ($m.Class -ne 43) { continue } } catch { continue }
@@ -500,31 +513,41 @@ try {
       if (-not $smtp) { try { $smtp = $m.SenderEmailAddress } catch {} }
       $attCount = 0
       try { $attCount = $m.Attachments.Count } catch {}
-      if ($shown -lt 15) {
-        Write-Output ('DEBUG=[' + $ref + '] candidate sender=' + $smtp + ' atts=' + $attCount + ' subj=' + $subj)
-        $shown++
-      }
-      if (-not $smtp -or $smtp.ToLower() -ne $sender) { continue }
-      $saved = @()
+      $hasXlsx = $false
       foreach ($att in $m.Attachments) {
         $fn = ''
         try { $fn = $att.FileName } catch {}
-        if ($fn -match '\\.xlsx$') {
+        if ($fn -match '\\.xlsx$' -and $fn.Contains($ref)) { $hasXlsx = $true; break }
+      }
+      $hasKeyword = $subj.ToLower().Contains($keyword)
+      if ($shown -lt 15) {
+        Write-Output ('DEBUG=[' + $ref + '] candidate sender=' + $smtp + ' atts=' + $attCount + ' xlsx=' + $hasXlsx + ' keyword=' + $hasKeyword + ' subj=' + $subj)
+        $shown++
+      }
+      if (-not ($hasKeyword -and $hasXlsx)) { continue }
+      $isGmail = ($smtp -and $smtp.ToLower() -eq $sender)
+      if ($isGmail) { $best = $m; $bestGmail = $true; break }
+      if ($best -eq $null) { $best = $m }
+    }
+    if ($best -ne $null) {
+      Write-Output ('DEBUG=[' + $ref + '] chosen fromGmail=' + $bestGmail + ' subj=' + $best.Subject)
+      $saved = @()
+      foreach ($att in $best.Attachments) {
+        $fn = ''
+        try { $fn = $att.FileName } catch {}
+        if ($fn -match '\\.xlsx$' -and $fn.Contains($ref)) {
           $att.SaveAsFile((Join-Path $dest $fn))
           $saved += $fn
-        } else {
-          Write-Output ('DEBUG=[' + $ref + '] attachment ignored (not .xlsx): ' + $fn)
         }
       }
       if ($saved.Count -gt 0) {
         Write-Output ('RESULT=' + $ref + '|saved|' + ($saved -join ' ; '))
       } else {
-        Write-Output ('RESULT=' + $ref + '|no_xlsx|Email trouve mais aucune piece jointe .xlsx')
+        Write-Output ('RESULT=' + $ref + '|no_xlsx|Email trouve mais aucune piece .xlsx nommee avec la ref')
       }
-      $found = $true
-      break
+    } else {
+      Write-Output ('RESULT=' + $ref + '|not_found|Aucun email "' + $keyword + '" avec piece .xlsx pour ' + $ref)
     }
-    if (-not $found) { Write-Output ('RESULT=' + $ref + '|not_found|Aucun email de ' + $sender + ' avec ' + $ref + ' dans objet') }
   }
   Write-Output 'DONE=ok'
 } catch {
