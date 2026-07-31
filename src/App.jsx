@@ -79,16 +79,13 @@ function App() {
   const [importResults, setImportResults] = useState(null);
   const [importDebug, setImportDebug] = useState([]);
   const [cleaning, setCleaning] = useState(false);
+  const [sendingAll, setSendingAll] = useState(false);
 
-  // Parse the textarea into a clean, de-duplicated list of refs. Accepts refs
-  // separated by newlines, commas, semicolons or spaces.
+  // Extract only LTA-ref-shaped tokens (e.g. 235-96330754) from any text — so a
+  // whole WhatsApp message ("Bonsoir, Veuillez valider sans blocage: …") can be
+  // pasted and the greeting/instructions are ignored. De-duplicated.
   const parseRefs = (text) => [
-    ...new Set(
-      String(text)
-        .split(/[\s,;]+/)
-        .map((r) => r.trim())
-        .filter(Boolean),
-    ),
+    ...new Set(String(text).match(/\b\d{3}-\d{6,9}\b/g) || []),
   ];
 
   const fetchXlsxFromInbox = async () => {
@@ -118,6 +115,26 @@ function App() {
     } finally {
       setImporting(false);
     }
+  };
+
+  // Paste the clipboard (a whole WhatsApp message) into the refs box. On mobile /
+  // AnyDesk where Ctrl+V is awkward, this button does it. Appends so several
+  // messages can be pasted in a row (parseRefs de-dupes).
+  const pasteIntoRefs = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (text)
+        setImportRefs((prev) => (prev.trim() ? `${prev}\n${text}` : text));
+    } catch {
+      alert(
+        "Impossible de lire le presse-papiers.\nCollez manuellement dans le champ (appui long → Coller).",
+      );
+    }
+  };
+
+  const copyRefs = async () => {
+    const refs = parseRefs(importRefs);
+    if (refs.length) await copyToClipboard(refs.join("\n"));
   };
 
   // Clean the DUM inputs and ARCHIVE the signed "…READY" folders (moved to
@@ -191,7 +208,9 @@ function App() {
 
   // Open an Outlook draft with the LTA's signed PDFs attached (backend uses
   // Outlook COM — mailto: can't carry attachments).
-  const sendByEmail = async (item) => {
+  // Core: open one Outlook draft. Sets per-item state and returns a result.
+  // `silent` suppresses the per-item alerts (used by the bulk "Envoyer tous").
+  const sendEmailRequest = async (item, { silent = false } = {}) => {
     setEmailState((p) => ({ ...p, [item.fileName]: "sending" }));
     try {
       const r = await fetch("/api/lta/outlook-email", {
@@ -206,9 +225,8 @@ function App() {
       if (r.ok && data.ok) {
         setEmailState((p) => ({ ...p, [item.fileName]: "sent" }));
         // Classic Outlook (COM) attaches automatically. The clipboard fallback
-        // (new Outlook / web) opens compose with the PDFs on the clipboard —
-        // the user must paste them in.
-        if (data.method === "clipboard") {
+        // (new Outlook / web) opens compose with the PDFs on the clipboard.
+        if (!silent && data.method === "clipboard") {
           const diag = data.comErr
             ? `\n\n— Diagnostic —\nAuto-attach (classic Outlook COM) failed:\n${data.comErr}\nApp running as Administrator: ${data.elevated ? "YES" : "no"}`
             : "";
@@ -219,32 +237,63 @@ function App() {
               diag,
           );
         }
-        setTimeout(
-          () =>
-            setEmailState((p) => {
-              const n = { ...p };
-              delete n[item.fileName];
-              return n;
-            }),
-          2500,
-        );
-      } else {
-        setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
-        alert(data.reason || "Could not open the Outlook draft.");
-        setTimeout(
-          () =>
-            setEmailState((p) => {
-              const n = { ...p };
-              delete n[item.fileName];
-              return n;
-            }),
-          2500,
-        );
+        return { ok: true, method: data.method };
       }
+      setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
+      if (!silent) alert(data.reason || "Could not open the Outlook draft.");
+      return { ok: false, reason: data.reason };
     } catch (e) {
       setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
-      alert(`Email failed: ${e.message}`);
+      if (!silent) alert(`Email failed: ${e.message}`);
+      return { ok: false, reason: e.message };
     }
+  };
+
+  const clearEmailStateSoon = (fileName) =>
+    setTimeout(
+      () =>
+        setEmailState((p) => {
+          const n = { ...p };
+          delete n[fileName];
+          return n;
+        }),
+      2500,
+    );
+
+  const sendByEmail = async (item) => {
+    await sendEmailRequest(item);
+    clearEmailStateSoon(item.fileName);
+  };
+
+  // Bulk: open an Outlook draft for every selected LTA, one at a time (COM can't
+  // be driven in parallel). One summary at the end instead of N alerts.
+  const sendAllEmails = async () => {
+    const items = orderedItems.filter((it) => selected[it.fileName]);
+    if (!items.length) return;
+    if (
+      !window.confirm(
+        `Créer un brouillon Outlook pour ${items.length} LTA ?\n\n` +
+          `Chaque brouillon s'ouvre avec ses PDF signés joints.`,
+      )
+    )
+      return;
+    setSendingAll(true);
+    let ok = 0;
+    const failed = [];
+    try {
+      for (const item of items) {
+        const res = await sendEmailRequest(item, { silent: true });
+        if (res.ok) ok++;
+        else failed.push(item.ltaRef);
+      }
+    } finally {
+      setSendingAll(false);
+      items.forEach((it) => clearEmailStateSoon(it.fileName));
+    }
+    alert(
+      `Brouillons créés : ${ok} / ${items.length}` +
+        (failed.length ? `\n\nÉchecs (non signés ?) :\n${failed.join("\n")}` : ""),
+    );
   };
 
   const ltaMap = useMemo(
@@ -533,6 +582,20 @@ function App() {
                 📁 Output
               </button>
             )}
+            <button
+              onClick={sendAllEmails}
+              disabled={!selectedFileNames.length || running || sendingAll}
+              title="Créer un brouillon Outlook pour tous les LTA sélectionnés"
+              className={`${btn} bg-[#0F6CBD] text-white shadow-soft hover:bg-[#0B5AA2]`}
+            >
+              {sendingAll
+                ? "Envoi…"
+                : `✉ Envoyer tous${
+                    selectedFileNames.length
+                      ? ` (${selectedFileNames.length})`
+                      : ""
+                  }`}
+            </button>
             <button
               onClick={run}
               disabled={!selectedFileNames.length || running}
@@ -938,8 +1001,11 @@ function App() {
                 Importer les DUMs depuis Outlook
               </h2>
               <p className="mt-1 text-sm text-steel">
-                Saisissez un ou plusieurs numéros de LTA. L'app cherche dans la
-                boîte de réception Outlook du compte{" "}
+                Collez le message WhatsApp complet — l'app en extrait
+                automatiquement les références (format{" "}
+                <span className="font-mono text-ink">235-96330754</span>) et
+                ignore le reste du texte. Elle cherche ensuite dans la boîte de
+                réception Outlook du compte{" "}
                 <span className="font-semibold text-ink">medafrica-log.com</span>{" "}
                 l'email dont l'objet contient la référence et{" "}
                 <span className="font-semibold text-ink">« LTA Complet »</span>,
@@ -951,17 +1017,58 @@ function App() {
               </p>
 
               <div className="mt-4 rounded-2xl border border-ink/10 bg-white/70 p-4">
-                <label className="text-xs font-bold uppercase tracking-wider text-steel">
-                  Références LTA
-                </label>
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold uppercase tracking-wider text-steel">
+                    Références LTA — collez le message WhatsApp
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={pasteIntoRefs}
+                      title="Coller depuis le presse-papiers"
+                      className={`${btn} !px-3 !py-1.5 bg-ink text-white hover:bg-ink/90`}
+                    >
+                      📋 Coller
+                    </button>
+                    <button
+                      onClick={copyRefs}
+                      disabled={parseRefs(importRefs).length === 0}
+                      title="Copier les références détectées"
+                      className={`${btnGhost} !px-3 !py-1.5`}
+                    >
+                      ⧉ Copier
+                    </button>
+                    <button
+                      onClick={() => setImportRefs("")}
+                      disabled={!importRefs}
+                      title="Effacer"
+                      className={`${btnGhost} !px-3 !py-1.5`}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
                 <textarea
                   value={importRefs}
                   onChange={(e) => setImportRefs(e.target.value)}
-                  placeholder={"157-55633583\n123-12344556"}
-                  rows={6}
+                  placeholder={
+                    "Collez ici, ex :\n\nBonsoir,\nVeuillez valider sans blocage:\n235-96330754\n235-97644562\n235-98097145"
+                  }
+                  rows={10}
                   spellCheck={false}
-                  className="mt-2 w-full resize-y rounded-xl border border-ink/15 bg-white/80 px-3 py-2 font-mono text-sm text-ink outline-none focus:border-ink/40"
+                  className="mt-2 w-full resize-y rounded-xl border border-ink/15 bg-white/80 px-3 py-2.5 font-mono text-sm text-ink outline-none focus:border-ink/40"
                 />
+                {parseRefs(importRefs).length > 0 && (
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {parseRefs(importRefs).map((ref) => (
+                      <span
+                        key={ref}
+                        className="rounded-full border border-[#0F6CBD]/30 bg-[#0F6CBD]/10 px-2.5 py-0.5 font-mono text-[11px] font-semibold text-[#0F6CBD]"
+                      >
+                        {ref}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 <div className="mt-3 flex items-center gap-3">
                   <button
                     onClick={fetchXlsxFromInbox}

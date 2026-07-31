@@ -4,6 +4,16 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-29 — Import: paste WhatsApp message + "Envoyer tous les LTA" bulk draft
+
+**Import tab — paste a whole WhatsApp message:** `parseRefs` now extracts only LTA-ref-shaped tokens via `/\b\d{3}-\d{6,9}\b/g`, so a full message ("Bonsoir, Veuillez valider sans blocage: 235-96330754 …") can be pasted and the greeting/instructions are ignored (verified against the 3 sample messages). Bigger textarea (rows 10) with **📋 Coller** (reads clipboard via `navigator.clipboard.readText`, appends — for mobile/AnyDesk where Ctrl+V is awkward), **⧉ Copier** (copies detected refs), and **✕** (clear). The detected refs render live as **blue chips** under the box so the filtering is visible before searching. Results still show as cards (green = Enregistré). `src/App.jsx` only.
+
+**"✉ Envoyer tous" bulk button (global, blue, top bar):** creates an Outlook draft for every selected LTA in one click. Refactored the email logic into `sendEmailRequest(item, { silent })` (core, sets per-item state, returns result) reused by both the single per-card button (`sendByEmail`) and the new `sendAllEmails` (loops sequentially — COM can't be parallel — with a confirm() and one summary alert instead of N; reports failures, e.g. LTAs not yet signed). New `sendingAll` state. `src/App.jsx` only.
+
+**Files changed:** `src/App.jsx`.
+
+---
+
 ## 2026-07-29 — Feature: open .xlsx in Excel from the app (LTAs + Import tabs)
 
 **Goal:** let the user open Excel files directly from the app instead of hunting in the folder.

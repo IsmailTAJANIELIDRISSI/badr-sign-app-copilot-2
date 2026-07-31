@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ Import paste-WhatsApp + "Envoyer tous" bulk drafts (2026-07-29)
+
+Import tab now accepts a pasted WhatsApp message and extracts only ref-shaped tokens (`\d{3}-\d{6,9}`), ignoring the greeting text; bigger textarea + **📋 Coller / ⧉ Copier / ✕** buttons (clipboard API, for mobile/AnyDesk); detected refs shown as live blue chips. New global blue **✉ Envoyer tous** button (top bar) creates an Outlook draft for every selected LTA sequentially (refactored `sendEmailRequest` core shared with the per-card button). Frontend only. See PROGRESS.md.
+
 ### ✅ "Import" tab — fetch DUM .xlsx from Outlook inbox by ref (2026-07-23)
 
 New Import tab: paste LTA refs → **Confirmer** → `POST /api/lta/fetch-xlsx` runs Outlook COM to search the default Inbox for mail from `tajanielidrissi.ismail@gmail.com` (override via `INBOX_SENDER_EMAIL`) whose subject contains the ref, and saves the `.xlsx` attachment into the dums folder (auto-refreshes the LTA list). Classic-Outlook-only, no SMTP/Graph. Verified COM Inbox read (`items=409`) + PS/JS syntax; the "saved" path needs validation on the real recipient machine. See PROGRESS.md.
