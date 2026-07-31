@@ -60,6 +60,18 @@ app.get("/api/config", (_req, res) => {
   });
 });
 
+// Output-folder status for an LTA after signing: "problem" if a
+// "LTA N° <ref> PROBLEM" folder exists, "ready" if a "… READY" folder exists,
+// else "". Lets the UI flag PROBLEM LTAs (red card) before they're emailed.
+const getOutputStatus = async (ltaRef) => {
+  const base = path.resolve(config.directories.signedLtas);
+  if (await fs.pathExists(path.join(base, `LTA N° ${ltaRef} PROBLEM`)))
+    return "problem";
+  if (await fs.pathExists(path.join(base, `LTA N° ${ltaRef} READY`)))
+    return "ready";
+  return "";
+};
+
 app.get("/api/lta-files", async (_req, res) => {
   const parsed = await scanDumFiles();
 
@@ -80,8 +92,12 @@ app.get("/api/lta-files", async (_req, res) => {
     if (dirty) await saveShippers(shippers);
   }
 
+  const statuses = await Promise.all(
+    parsed.map((item) => getOutputStatus(item.ltaRef)),
+  );
+
   res.json(
-    parsed.map((item) => ({
+    parsed.map((item, i) => ({
       fileName: item.fileName,
       filePath: path.resolve(item.filePath),
       ltaRef: item.ltaRef,
@@ -90,6 +106,7 @@ app.get("/api/lta-files", async (_req, res) => {
       validDums: item.validDums,
       invalidDums: item.invalidDums,
       shipperName: item.shipperName || "",
+      outputStatus: statuses[i],
       dums: item.dums,
     })),
   );

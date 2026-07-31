@@ -4,6 +4,18 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-07-29 — PROBLEM LTAs shown as red cards
+
+**Goal:** an LTA that signed with a `PROBLEM` output folder should stand out (red) before it's emailed.
+
+**Backend (`server/index.js`):** new `getOutputStatus(ltaRef)` checks the outputs dir — returns `"problem"` if `LTA N° <ref> PROBLEM` exists, `"ready"` if `… READY` exists, else `""`. `/api/lta-files` now includes `outputStatus` per item (computed via `Promise.all`). Verified against the real READY folder + a temp PROBLEM folder.
+
+**Frontend (`src/App.jsx`):** `isProblem = item.outputStatus === "problem"` → the card gets a **red** background/border/ring (overrides the normal white + the dimmed-unselected state so it's always visible) plus a **⚠ PROBLEM** badge in the header.
+
+**Files changed:** `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-07-29 — Import: paste WhatsApp message + "Envoyer tous les LTA" bulk draft
 
 **Import tab — paste a whole WhatsApp message:** `parseRefs` now extracts only LTA-ref-shaped tokens via `/\b\d{3}-\d{6,9}\b/g`, so a full message ("Bonsoir, Veuillez valider sans blocage: 235-96330754 …") can be pasted and the greeting/instructions are ignored (verified against the 3 sample messages). Bigger textarea (rows 10) with **📋 Coller** (reads clipboard via `navigator.clipboard.readText`, appends — for mobile/AnyDesk where Ctrl+V is awkward), **⧉ Copier** (copies detected refs), and **✕** (clear). The detected refs render live as **blue chips** under the box so the filtering is visible before searching. Results still show as cards (green = Enregistré). `src/App.jsx` only.

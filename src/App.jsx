@@ -747,6 +747,9 @@ function App() {
                   const isSelected = Boolean(selected[item.fileName]);
                   const isActive =
                     running && stats.currentLta === item.ltaRef;
+                  // Signed with a PROBLEM output folder → red card so it's seen
+                  // before being emailed.
+                  const isProblem = item.outputStatus === "problem";
 
                   return (
                     <article
@@ -756,18 +759,24 @@ function App() {
                       onDragOver={(e) => orderMode && onDragOver(e, idx)}
                       onDrop={(e) => orderMode && onDrop(e, idx)}
                       onDragEnd={onDragEnd}
-                      className={`group rounded-2xl border bg-white/80 p-4 shadow-sm backdrop-blur transition-all ${
-                        orderMode
-                          ? `cursor-grab active:cursor-grabbing ${
-                              dragOver === idx
-                                ? "border-amber-400 ring-2 ring-amber-300"
-                                : "border-ink/10"
+                      className={`group rounded-2xl border p-4 shadow-sm backdrop-blur transition-all ${
+                        isProblem
+                          ? `border-red-400 bg-red-50 ring-1 ring-red-300 ${
+                              orderMode
+                                ? "cursor-grab active:cursor-grabbing"
+                                : ""
                             }`
-                          : isActive
-                            ? "border-emerald-400 ring-2 ring-emerald-300"
-                            : isSelected
-                              ? "border-ink/25 hover:border-ink/40"
-                              : "border-ink/10 opacity-60 hover:opacity-100"
+                          : orderMode
+                            ? `bg-white/80 cursor-grab active:cursor-grabbing ${
+                                dragOver === idx
+                                  ? "border-amber-400 ring-2 ring-amber-300"
+                                  : "border-ink/10"
+                              }`
+                            : isActive
+                              ? "bg-white/80 border-emerald-400 ring-2 ring-emerald-300"
+                              : isSelected
+                                ? "bg-white/80 border-ink/25 hover:border-ink/40"
+                                : "bg-white/80 border-ink/10 opacity-60 hover:opacity-100"
                       }`}
                     >
                       <div className="mb-3 flex items-center justify-between gap-2">
@@ -798,6 +807,11 @@ function App() {
                         )}
 
                         <div className="flex items-center gap-1.5">
+                          {isProblem && (
+                            <span className="rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold text-white">
+                              ⚠ PROBLEM
+                            </span>
+                          )}
                           {isActive && (
                             <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-bold text-emerald-700">
                               ● SIGNING

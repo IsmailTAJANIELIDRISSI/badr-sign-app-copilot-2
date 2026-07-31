@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ PROBLEM LTAs shown as red cards (2026-07-29)
+
+`/api/lta-files` now returns `outputStatus` (`problem`/`ready`/`""`) from the signed output folder name; cards with a `PROBLEM` folder render red (bg + border + ring) with a ⚠ PROBLEM badge so they're caught before emailing. `server/index.js` + `src/App.jsx`. See PROGRESS.md.
+
 ### ✅ Import paste-WhatsApp + "Envoyer tous" bulk drafts (2026-07-29)
 
 Import tab now accepts a pasted WhatsApp message and extracts only ref-shaped tokens (`\d{3}-\d{6,9}`), ignoring the greeting text; bigger textarea + **📋 Coller / ⧉ Copier / ✕** buttons (clipboard API, for mobile/AnyDesk); detected refs shown as live blue chips. New global blue **✉ Envoyer tous** button (top bar) creates an Outlook draft for every selected LTA sequentially (refactored `sendEmailRequest` core shared with the per-card button). Frontend only. See PROGRESS.md.
