@@ -4,9 +4,9 @@
 
 ## Recently Completed
 
-### ✅ PROBLEM LTAs shown as red cards (2026-07-29)
+### ✅ Card status colours — PROBLEM red / completed green (2026-07-29)
 
-`/api/lta-files` now returns `outputStatus` (`problem`/`ready`/`""`) from the signed output folder name; cards with a `PROBLEM` folder render red (bg + border + ring) with a ⚠ PROBLEM badge so they're caught before emailing. `server/index.js` + `src/App.jsx`. See PROGRESS.md.
+`/api/lta-files` now returns `outputStatus` (`problem`/`ready`/`""`) from the signed output folder name; cards render **red** with ⚠ PROBLEM (PROBLEM folder) or **green** with ✓ Terminé (READY folder) so they're caught before emailing. `server/index.js` + `src/App.jsx`. See PROGRESS.md.
 
 ### ✅ Import paste-WhatsApp + "Envoyer tous" bulk drafts (2026-07-29)
 

@@ -4,13 +4,13 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
-## 2026-07-29 — PROBLEM LTAs shown as red cards
+## 2026-07-29 — Card status colours: PROBLEM = red, completed = green
 
-**Goal:** an LTA that signed with a `PROBLEM` output folder should stand out (red) before it's emailed.
+**Goal:** after signing, a `PROBLEM` LTA should stand out (red) and a completed one (green) before emailing.
 
 **Backend (`server/index.js`):** new `getOutputStatus(ltaRef)` checks the outputs dir — returns `"problem"` if `LTA N° <ref> PROBLEM` exists, `"ready"` if `… READY` exists, else `""`. `/api/lta-files` now includes `outputStatus` per item (computed via `Promise.all`). Verified against the real READY folder + a temp PROBLEM folder.
 
-**Frontend (`src/App.jsx`):** `isProblem = item.outputStatus === "problem"` → the card gets a **red** background/border/ring (overrides the normal white + the dimmed-unselected state so it's always visible) plus a **⚠ PROBLEM** badge in the header.
+**Frontend (`src/App.jsx`):** `isProblem`/`isReady` from `outputStatus` → the card gets a **red** (PROBLEM) or **green** (READY/completed) background/border/ring, overriding the normal white + dimmed-unselected state so it's always visible, plus a header badge: **⚠ PROBLEM** or **✓ Terminé** (Terminé hidden while the LTA is actively signing).
 
 **Files changed:** `server/index.js`, `src/App.jsx`.
 

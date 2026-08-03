@@ -747,9 +747,10 @@ function App() {
                   const isSelected = Boolean(selected[item.fileName]);
                   const isActive =
                     running && stats.currentLta === item.ltaRef;
-                  // Signed with a PROBLEM output folder → red card so it's seen
-                  // before being emailed.
+                  // Output-folder status → colour the whole card so it's obvious
+                  // before emailing: PROBLEM = red, completed (READY) = green.
                   const isProblem = item.outputStatus === "problem";
+                  const isReady = item.outputStatus === "ready";
 
                   return (
                     <article
@@ -766,17 +767,23 @@ function App() {
                                 ? "cursor-grab active:cursor-grabbing"
                                 : ""
                             }`
-                          : orderMode
-                            ? `bg-white/80 cursor-grab active:cursor-grabbing ${
-                                dragOver === idx
-                                  ? "border-amber-400 ring-2 ring-amber-300"
-                                  : "border-ink/10"
+                          : isReady
+                            ? `border-emerald-400 bg-emerald-50 ring-1 ring-emerald-300 ${
+                                orderMode
+                                  ? "cursor-grab active:cursor-grabbing"
+                                  : ""
                               }`
-                            : isActive
-                              ? "bg-white/80 border-emerald-400 ring-2 ring-emerald-300"
-                              : isSelected
-                                ? "bg-white/80 border-ink/25 hover:border-ink/40"
-                                : "bg-white/80 border-ink/10 opacity-60 hover:opacity-100"
+                            : orderMode
+                              ? `bg-white/80 cursor-grab active:cursor-grabbing ${
+                                  dragOver === idx
+                                    ? "border-amber-400 ring-2 ring-amber-300"
+                                    : "border-ink/10"
+                                }`
+                              : isActive
+                                ? "bg-white/80 border-emerald-400 ring-2 ring-emerald-300"
+                                : isSelected
+                                  ? "bg-white/80 border-ink/25 hover:border-ink/40"
+                                  : "bg-white/80 border-ink/10 opacity-60 hover:opacity-100"
                       }`}
                     >
                       <div className="mb-3 flex items-center justify-between gap-2">
@@ -810,6 +817,11 @@ function App() {
                           {isProblem && (
                             <span className="rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold text-white">
                               ⚠ PROBLEM
+                            </span>
+                          )}
+                          {isReady && !isActive && (
+                            <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[10px] font-bold text-white">
+                              ✓ Terminé
                             </span>
                           )}
                           {isActive && (
