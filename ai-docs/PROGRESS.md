@@ -4,6 +4,70 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-09-30 — Fix: false "Signature Failed" email mid-LTA (chrono fired on a slow but healthy run)
+
+**Problem:** LTA `607-54315402` (17 DUM) sent `Signature Failed LTA N°607-54315402 (17 DUM)` at 16:56:25 while DUM 16 was being signed normally — nothing had failed and the run carried on.
+
+**Root cause:** the per-LTA chrono was a **fixed deadline**: `pendingDums × 1.25 min` = **21.25 min** for 17 DUM. That day BADR's signing loader alone took ~57 s per DUM, so a DUM cycle was ~1.4–1.5 min and the LTA needed ~25 min. The `setTimeout` expired after DUM 15 and called `notifyLtaFailure` — it never looked at whether the LTA was still advancing. The subject says "Failed" because the chrono reuses the failure email. It also left no log line explaining itself (WhatsApp disabled → only `📧 Failure email sent` showed). Same bug hit any resumed LTA with 1 DUM left (budget 1.25 min < one slow DUM).
+
+**Fix (`server/automation.js`):** new `createLtaWatchdog({ budgetMs, stallMs, onSlow, onStuck })`. The budget rule is unchanged, but past the budget the LTA is reported **only if no DUM has been completed for `stallMinutes`** (default 5):
+
+- over budget + a DUM completed recently → one `warn` log (`⏱️ … slower than expected … no alert`), then re-checks when the idle time would reach the stall limit;
+- over budget + idle ≥ stall → logs `⏱️ Chrono alert …` (so the email is now explained in the journal) and sends WhatsApp + failure email, reason reworded to "looks stuck … no DUM completed for N min".
+- Progress signal: `emit` marks progress on log lines matching `(SUCCESS|SKIPPED) - DUM N` (main pass + both recovery passes). `FAILED` deliberately doesn't count — an LTA whose DUMs keep failing must still be reported.
+- `chronoTimers` now holds watchdog objects (`.clear()`), in `clearChrono` and the job `finally`.
+
+**Config:** `config.ltaChrono.stallMinutes` = env `LTA_STALL_MINUTES`, default 5. Documented in `.env.example`.
+
+**Verified** with scaled timings: the real case (budget 21.25, a DUM every 1.5 min, done at 25.5) → one "slow" log, **no alert**; hang at minute 18 → alert at ~23; hang at minute 24 → alert at ~29; nothing ever completes → alert at the budget; 1-DUM resume taking 1.6 min → no alert; fast LTA → nothing. Progress regex checked against 9 real log lines. Not run against BADR.
+
+**Note:** needs a full app relaunch to load (no hot-reload). Unchanged: a genuine stall alert still uses the "Signature Failed" subject, and one failure email per LTA per run (dedupe).
+
+**Files changed:** `server/automation.js`, `server/config.js`, `.env.example`.
+
+---
+
+## 2026-09-30 — Import tab: styled notifications — "[ref] pas trouvé en mail"
+
+**Goal:** after **Confirmer**, a ref with no matching email was only a grey "Introuvable" row, easy to miss in a long list. Refs that are found need nothing special; the missing ones must be obvious.
+
+**Frontend (`src/App.jsx`), no backend change:**
+
+- **Toast system** (new, reusable): `toasts` state + `pushToast({ tone, title, lines?, detail? })` / `dismissToast(id)`. Rendered once at the app root, **bottom-right** (top-right would cover the header's Run / Envoyer tous / Nettoyer buttons), visible from any tab. White card, coloured accent bar + icon, ✕ to close, `animate-floatIn`. Auto-closes after 5 s (success) or 15 s (warning/error). `role="alert"` / `role="status"`.
+- **`notifyImportResults(results)`** — one toast per outcome, so 1 or 20 missing refs never flood the screen:
+  - **red** — `N références pas trouvées en mail`, listing each as `235-97644562 pas trouvé en mail` (scrolls if long);
+  - **amber** — email found but no `.xlsx` attached;
+  - **green** — `N fichier(s) Excel importé(s)`.
+  - A global failure (Outlook unreachable, network) → red `Import impossible` + the reason.
+- **Result rows:** not-found rows are now **red** (tinted background + border) and labelled **Pas trouvé en mail** instead of grey "Introuvable"; "Sans .xlsx" rows are amber-tinted. `importStatusOf(res)` is the single place that maps a result to its bucket (shared by rows and toasts).
+
+**Verified** in the real UI (Vite + headless Edge, `/api/lta/fetch-xlsx` mocked with 1 saved / 2 not found / 1 without xlsx, then a 500): all three toasts and the `Import impossible` toast render, ✕ dismisses, no page errors, `vite build` OK. Not exercised against the real Outlook inbox.
+
+**Files changed:** `src/App.jsx`.
+
+---
+
+## 2026-09-30 — Fix: LTA-READY email refused by Gmail (552 5.3.4 size limit) on big LTAs
+
+**Problem:** LTA `235-98029514` (37 DUM) signed fine and was marked READY, but the email failed with `552-5.3.4 Your message exceeded Google's message size limits`. `sendLtaReadyEmail` attached **all** PDFs to **one** message. The folder is 30.1 MB (31 638 115 bytes); attachments are base64-encoded for SMTP, which adds ~37 %, so the message was **~43 MB on the wire**. `smtp.gmail.com` advertises `SIZE 35882577` (≈ 35.9 MB encoded = the "25 MB of attachments" limit; confirmed live via EHLO). 43 > 35.9 → rejected. Not a bug in signing, not credentials — purely size; any LTA above ~26 MB of PDFs would hit it.
+
+**Fix (`server/notifications.js`):** `sendLtaReadyEmail` now stats each PDF and packs them, in DUM order, into groups of at most `config.email.maxAttachMb` (new `splitAttachmentsBySize`).
+
+- **One group (normal LTA):** behaviour unchanged — same subject `MAWB {ref} ({n} DUM)`, empty body.
+- **Several groups:** one email per group, subject `MAWB {ref} ({n} DUM) [1/2]`, `[2/2]`…, and a one-line body saying which PDFs are in that part.
+- **Resume-safe:** each sent part writes `.email_sent_part_{i}of{N}` in the LTA folder; a re-run after a partial failure sends only the missing parts (no duplicate to the team). The existing `.email_sent` marker is still written by `automation.js` only when every part went out.
+- Stops at the first failing part; on a 552 / size error the log now says so and points at `EMAIL_MAX_ATTACH_MB`.
+
+**Config:** `config.email.maxAttachMb` = env `EMAIL_MAX_ATTACH_MB`, default **18** (≈ 25 MB encoded). Documented in `.env.example`.
+
+**Verified** against a local fake SMTP server enforcing Gmail's `SIZE 35882577`, with 37 files totalling 31 638 115 bytes: unsplit → `552 5.3.4` reproduced (43.3 MB on the wire); default → 2 emails accepted (22 PDF / 25.7 MB and 15 PDF / 17.6 MB on the wire); part 2 forced to fail then re-run → part 1 skipped, only part 2 resent. Not yet exercised against real Gmail / the real folder.
+
+**To send the email for `235-98029514`:** fully relaunch the app (no hot-reload — see the stale-server note below), then re-run that LTA: every DUM is skipped as already signed, there is no `.email_sent` marker, so the email goes out in 2 parts.
+
+**Files changed:** `server/notifications.js`, `server/config.js`, `.env.example`.
+
+---
+
 ## 2026-07-29 — Card status colours: PROBLEM = red, completed = green
 
 **Goal:** after signing, a `PROBLEM` LTA should stand out (red) and a completed one (green) before emailing.

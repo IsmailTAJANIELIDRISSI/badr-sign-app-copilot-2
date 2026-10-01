@@ -103,6 +103,11 @@ export const config = {
     // Env-only. No hardcoded fallback: unset EMAIL_TO => no email is sent.
     to: toList(process.env.EMAIL_TO, []),
     cc: toList(process.env.EMAIL_CC, []),
+    // Max total size of the PDFs attached to ONE email, in MB. Attachments grow
+    // ~37% when base64-encoded for SMTP, so 18 MB of PDFs ≈ 25 MB on the wire —
+    // under Gmail's send limit and the usual recipient-side limits. An LTA whose
+    // PDFs exceed this is split into several emails ("[1/2]", "[2/2]", ...).
+    maxAttachMb: toFloat(process.env.EMAIL_MAX_ATTACH_MB, 18),
   },
   // Recipients for the manual "Envoyer par email" button (opens an Outlook
   // draft with the PDFs attached). Distinct from the automated `email.to` list
@@ -125,9 +130,12 @@ export const config = {
     callmebotApiKey: process.env.WHATSAPP_CALLMEBOT_APIKEY || "",
   },
   // Chrono rule: an LTA of 16 DUMs is expected to finish in 20 min => 1.25 min/DUM.
-  // If an LTA is not finished within (dumCount * minutesPerDum) it triggers a
-  // WhatsApp "taking too long" alert. Overridable via LTA_MINUTES_PER_DUM.
+  // An LTA that is past (dumCount * minutesPerDum) AND has not completed a DUM
+  // for stallMinutes triggers the "stuck" WhatsApp + failure email. Past the
+  // budget but still signing DUMs = slow BADR, logged only.
+  // Overridable via LTA_MINUTES_PER_DUM / LTA_STALL_MINUTES.
   ltaChrono: {
     minutesPerDum: toFloat(process.env.LTA_MINUTES_PER_DUM, 20 / 16),
+    stallMinutes: toFloat(process.env.LTA_STALL_MINUTES, 5),
   },
 };

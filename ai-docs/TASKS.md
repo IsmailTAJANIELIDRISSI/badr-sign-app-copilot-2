@@ -4,6 +4,22 @@
 
 ## Recently Completed
 
+### ✅ Chrono no longer sends a false "Signature Failed" email on slow LTAs (2026-09-30)
+
+The chrono was a fixed deadline (`pending DUM × 1.25 min`); with BADR signing at ~57 s/DUM a healthy 17-DUM LTA overran its 21 min budget and got a "Signature Failed" email at DUM 16. Now (`createLtaWatchdog` in `server/automation.js`) an over-budget LTA is reported only when **no DUM has completed for `LTA_STALL_MINUTES` (default 5)**; slow-but-advancing is just a log line, and a real alert is now explained in the journal. Verified with scaled timings, not against BADR. See PROGRESS.md.
+
+**Open question:** a genuine stall alert still goes out under the subject "Signature Failed …" to the full `EMAIL_TO` list — consider a distinct subject (e.g. "LTA bloquée") if the team finds it alarming.
+
+### ✅ Import tab — "[ref] pas trouvé en mail" notifications (2026-09-30)
+
+After **Confirmer**, missing refs now raise a red toast (bottom-right) listing each `<ref> pas trouvé en mail`, plus amber (email without `.xlsx`) and green (N imported) toasts; not-found result rows are red and labelled **Pas trouvé en mail**. New reusable `pushToast` in `src/App.jsx` — the remaining `alert()` calls (clean, email, clipboard) could be moved to it later. Frontend only; verified with a mocked inbox response. See PROGRESS.md.
+
+### ✅ LTA-READY email split when PDFs exceed the SMTP size limit (2026-09-30)
+
+Gmail refused the READY email for a 37-DUM LTA (`552 5.3.4 message exceeded size limits`): 30.1 MB of PDFs ≈ 43 MB once base64-encoded, over Gmail's `SIZE 35882577`. `sendLtaReadyEmail` now splits the PDFs into several emails of at most `EMAIL_MAX_ATTACH_MB` (default 18) — subject `MAWB {ref} ({n} DUM) [1/2]`… — with per-part markers so a re-run only sends missing parts. Normal-size LTAs are unchanged. Verified against a fake SMTP server with Gmail's limit; **still to confirm on the real machine** (re-run `235-98029514` after a full relaunch). See PROGRESS.md.
+
+**Follow-ups:** (1) the manual **Envoyer par email** Outlook draft still attaches every PDF to one message, so the same LTA can be refused by Outlook/Exchange — not split yet. (2) `.env.example` is tracked in git and contains a real-looking Gmail app password (`EMAIL_PASS`) — replace it with a placeholder and rotate the app password.
+
 ### ✅ Card status colours — PROBLEM red / completed green (2026-07-29)
 
 `/api/lta-files` now returns `outputStatus` (`problem`/`ready`/`""`) from the signed output folder name; cards render **red** with ⚠ PROBLEM (PROBLEM folder) or **green** with ✓ Terminé (READY folder) so they're caught before emailing. `server/index.js` + `src/App.jsx`. See PROGRESS.md.

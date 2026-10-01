@@ -88,12 +88,72 @@ function App() {
     ...new Set(String(text).match(/\b\d{3}-\d{6,9}\b/g) || []),
   ];
 
+  // Toast notifications, stacked bottom-right and visible from any tab.
+  // { id, tone: "error" | "warn" | "success", title, lines?: [{ ref, text }], detail? }
+  const [toasts, setToasts] = useState([]);
+  const dismissToast = (id) =>
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  const pushToast = (toast) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    setToasts((prev) => [...prev, { ...toast, id }]);
+    // Problems stay long enough to be read; they also remain in the results list.
+    setTimeout(() => dismissToast(id), toast.tone === "success" ? 5000 : 15000);
+  };
+
+  // Import result buckets. Anything that is neither saved, "no_xlsx" nor a
+  // global error means the ref has no matching email.
+  const importStatusOf = (res) =>
+    ["saved", "no_xlsx", "error"].includes(res.status) ? res.status : "not_found";
+
+  // One toast per outcome, so 1 or 20 missing refs never flood the screen.
+  const notifyImportResults = (results) => {
+    const refsOf = (status) =>
+      results.filter((r) => importStatusOf(r) === status).map((r) => r.ref);
+    const missing = refsOf("not_found");
+    const noXlsx = refsOf("no_xlsx");
+    const saved = refsOf("saved");
+    if (missing.length) {
+      pushToast({
+        tone: "error",
+        title:
+          missing.length === 1
+            ? "Référence pas trouvée en mail"
+            : `${missing.length} références pas trouvées en mail`,
+        lines: missing.map((ref) => ({ ref, text: "pas trouvé en mail" })),
+      });
+    }
+    if (noXlsx.length) {
+      pushToast({
+        tone: "warn",
+        title:
+          noXlsx.length === 1
+            ? "Email trouvé, mais sans fichier .xlsx"
+            : `${noXlsx.length} emails trouvés, mais sans fichier .xlsx`,
+        lines: noXlsx.map((ref) => ({ ref, text: "email sans .xlsx" })),
+      });
+    }
+    if (saved.length) {
+      pushToast({
+        tone: "success",
+        title:
+          saved.length === 1
+            ? "1 fichier Excel importé"
+            : `${saved.length} fichiers Excel importés`,
+        detail: missing.length || noXlsx.length ? saved.join(", ") : "",
+      });
+    }
+  };
+
   const fetchXlsxFromInbox = async () => {
     const refs = parseRefs(importRefs);
     if (!refs.length) return;
     setImporting(true);
     setImportResults(null);
     setImportDebug([]);
+    const failImport = (detail) => {
+      setImportResults([{ ref: "—", status: "error", detail }]);
+      pushToast({ tone: "error", title: "Import impossible", detail });
+    };
     try {
       const r = await fetch("/api/lta/fetch-xlsx", {
         method: "POST",
@@ -103,15 +163,15 @@ function App() {
       const data = await r.json();
       setImportDebug(data.debug || []);
       if (r.ok && data.ok) {
-        setImportResults(data.results || []);
+        const results = data.results || [];
+        setImportResults(results);
+        notifyImportResults(results);
         if (data.savedCount > 0) refresh(); // new files → reload the LTA list
       } else {
-        setImportResults([
-          { ref: "—", status: "error", detail: data.reason || "Échec." },
-        ]);
+        failImport(data.reason || "Échec.");
       }
     } catch (e) {
-      setImportResults([{ ref: "—", status: "error", detail: e.message }]);
+      failImport(e.message);
     } finally {
       setImporting(false);
     }
@@ -534,6 +594,84 @@ function App() {
 
   return (
     <div className="flex h-screen flex-col overflow-hidden font-body text-ink">
+      {/* ── Toasts ──────────────────────────────────────────────────────── */}
+      {/* Bottom-right so they never cover the header's action buttons. */}
+      <div
+        aria-live="assertive"
+        className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-[380px] max-w-[calc(100vw-2rem)] flex-col gap-2.5"
+      >
+        {toasts.map((t) => {
+          const tone =
+            t.tone === "success"
+              ? {
+                  bar: "bg-emerald-500",
+                  icon: "bg-emerald-100 text-emerald-700",
+                  glyph: "✓",
+                  title: "text-emerald-800",
+                  border: "border-emerald-200",
+                }
+              : t.tone === "warn"
+                ? {
+                    bar: "bg-amber-500",
+                    icon: "bg-amber-100 text-amber-700",
+                    glyph: "!",
+                    title: "text-amber-800",
+                    border: "border-amber-200",
+                  }
+                : {
+                    bar: "bg-red-500",
+                    icon: "bg-red-100 text-red-700",
+                    glyph: "✕",
+                    title: "text-red-800",
+                    border: "border-red-200",
+                  };
+          return (
+            <div
+              key={t.id}
+              role={t.tone === "success" ? "status" : "alert"}
+              className={`pointer-events-auto flex animate-floatIn overflow-hidden rounded-2xl border bg-white shadow-soft ${tone.border}`}
+            >
+              <span className={`w-1.5 shrink-0 ${tone.bar}`} />
+              <div className="flex min-w-0 flex-1 items-start gap-3 px-3.5 py-3">
+                <span
+                  className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-sm font-bold ${tone.icon}`}
+                >
+                  {tone.glyph}
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className={`text-sm font-bold ${tone.title}`}>{t.title}</p>
+                  {t.lines?.length > 0 && (
+                    <ul className="mt-1.5 max-h-44 space-y-1 overflow-auto pr-1">
+                      {t.lines.map((line) => (
+                        <li key={line.ref} className="text-xs text-steel">
+                          <span className="font-mono font-semibold text-ink">
+                            {line.ref}
+                          </span>{" "}
+                          {line.text}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {t.detail && (
+                    <p className="mt-1 break-words text-xs text-steel">
+                      {t.detail}
+                    </p>
+                  )}
+                </div>
+                <button
+                  onClick={() => dismissToast(t.id)}
+                  title="Fermer"
+                  aria-label="Fermer la notification"
+                  className="shrink-0 rounded-lg px-1.5 text-sm text-steel/70 transition hover:bg-ink/5 hover:text-ink"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
       {/* ── Top bar ─────────────────────────────────────────────────────── */}
       <header className="shrink-0 border-b border-ink/10 bg-white/70 backdrop-blur">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-5 py-3">
@@ -1127,34 +1265,39 @@ function App() {
               {importResults && (
                 <div className="mt-4 space-y-2">
                   {importResults.map((res, i) => {
+                    const status = importStatusOf(res);
                     const tone =
-                      res.status === "saved"
+                      status === "saved"
                         ? {
                             dot: "bg-emerald-500",
                             label: "Enregistré",
                             cls: "text-emerald-600",
+                            row: "border-ink/10 bg-white/70",
                           }
-                        : res.status === "no_xlsx"
+                        : status === "no_xlsx"
                           ? {
                               dot: "bg-amber-500",
                               label: "Sans .xlsx",
                               cls: "text-amber-600",
+                              row: "border-amber-300 bg-amber-50",
                             }
-                          : res.status === "error"
+                          : status === "error"
                             ? {
                                 dot: "bg-coral",
                                 label: "Erreur",
                                 cls: "text-coral",
+                                row: "border-red-300 bg-red-50",
                               }
                             : {
-                                dot: "bg-steel",
-                                label: "Introuvable",
-                                cls: "text-steel",
+                                dot: "bg-red-500",
+                                label: "Pas trouvé en mail",
+                                cls: "text-red-600",
+                                row: "border-red-300 bg-red-50",
                               };
                     return (
                       <div
                         key={`${res.ref}-${i}`}
-                        className="flex items-start gap-3 rounded-xl border border-ink/10 bg-white/70 px-4 py-2.5"
+                        className={`flex items-start gap-3 rounded-xl border px-4 py-2.5 ${tone.row}`}
                       >
                         <span
                           className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${tone.dot}`}

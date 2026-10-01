@@ -1853,6 +1853,52 @@ const reprintBySerieRef = async (
   onLog("info", `✓ Reprint saved: ${path.basename(pdfPath)}`);
 };
 
+// Log lines that mean "a DUM just got done" (main pass and recovery passes).
+// Failures deliberately don't count: an LTA whose DUMs keep failing is not
+// advancing, and must still be reported as stuck.
+const DUM_DONE_LOG = /(SUCCESS|SKIPPED) - DUM \d+/;
+
+/**
+ * Per-LTA "chrono" watchdog. The LTA gets a time budget; once it is over budget
+ * it is reported as stuck ONLY if no DUM has been completed for `stallMs`.
+ *
+ * A fixed deadline alone raised false "Signature Failed" emails: when BADR is
+ * slow (signing loader ~1 min per DUM) an LTA runs past its budget while still
+ * completing a DUM every ~1.5 min. Over budget + still advancing = `onSlow`
+ * (once, log only); over budget + no DUM done for `stallMs` = `onStuck`.
+ */
+export const createLtaWatchdog = ({ budgetMs, stallMs, onSlow, onStuck }) => {
+  let lastProgressAt = Date.now();
+  let slowReported = false;
+  let timer = null;
+
+  const check = () => {
+    const idleMs = Date.now() - lastProgressAt;
+    if (idleMs >= stallMs) {
+      timer = null;
+      onStuck(idleMs);
+      return;
+    }
+    if (!slowReported) {
+      slowReported = true;
+      onSlow();
+    }
+    // Re-check at the moment the current idle period would reach stallMs.
+    timer = setTimeout(check, stallMs - idleMs);
+  };
+  timer = setTimeout(check, budgetMs);
+
+  return {
+    markProgress: () => {
+      lastProgressAt = Date.now();
+    },
+    clear: () => {
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+  };
+};
+
 export const runSigningJob = async ({
   parsedLtas,
   shipperByFileName,
@@ -1868,14 +1914,14 @@ export const runSigningJob = async ({
 
   const results = [];
 
-  // Per-LTA "chrono" watchdog timers. Each fires an independent WhatsApp alert
-  // if its LTA is not finished within the expected time (dumCount * min/DUM).
+  // Per-LTA "chrono" watchdogs (see createLtaWatchdog). Each alerts if its LTA
+  // is over its expected time (dumCount * min/DUM) AND has stopped advancing.
   // Kept in a job-scoped map so we can clear them on completion / job abort.
   const chronoTimers = new Map();
   const clearChrono = (ltaRef) => {
     const t = chronoTimers.get(ltaRef);
     if (t) {
-      clearTimeout(t);
+      t.clear();
       chronoTimers.delete(ltaRef);
     }
   };
@@ -1917,6 +1963,10 @@ export const runSigningJob = async ({
     const emit = (level, message, meta = {}) => {
       onLog(level, message, meta);
       appendLtaLog(ltaLogPath, level, message, meta);
+      // A DUM got done → tell the chrono watchdog this LTA is still advancing.
+      if (DUM_DONE_LOG.test(message)) {
+        chronoTimers.get(lta.ltaRef)?.markProgress();
+      }
     };
 
     emit("info", `Processing LTA ${lta.ltaRef}`, {
@@ -1927,8 +1977,9 @@ export const runSigningJob = async ({
     });
 
     // Start the chrono watchdog for this LTA. Rule: 16 DUMs ≈ 20 min, i.e.
-    // ~1.25 min/DUM. If the LTA is not finished within that window, fire an
-    // independent WhatsApp alert (also covers the process being stopped/hung).
+    // ~1.25 min/DUM. Past that window the LTA is only reported (WhatsApp +
+    // failure email) once no DUM has been completed for stallMinutes — a slow
+    // LTA that keeps advancing is logged, not alerted.
     {
       const dumCount = lta.dums.length;
       // Track the in-progress LTA so job-level / process-level failures can
@@ -1967,26 +2018,43 @@ export const runSigningJob = async ({
           pendingCount === dumCount
             ? `${dumCount} DUM`
             : `${pendingCount} of ${dumCount} DUM remaining`;
+        const stallMin = config.ltaChrono.stallMinutes;
         chronoTimers.set(
           lta.ltaRef,
-          setTimeout(() => {
-            chronoTimers.delete(lta.ltaRef);
-            sendWhatsApp(
-              `⏱️ PROBLEM - LTA ${lta.ltaRef} (${scope}) is taking too long: ` +
-                `not finished after ~${Math.round(expectedMin)} min (expected done by then). ` +
-                `The process may be stuck, stopped, or missing DUMs — please check.`,
-              emit,
-            ).catch(() => {});
-            // Also email the failure with a screenshot of the current screen.
-            notifyLtaFailure({
-              ltaRef: lta.ltaRef,
-              dumCount,
-              reason:
-                `LTA ${lta.ltaRef} (${scope}) is taking too long — not finished after ` +
-                `~${Math.round(expectedMin)} min. The process may be stuck or stopped.`,
-              onLog: emit,
-            }).catch(() => {});
-          }, chronoMs),
+          createLtaWatchdog({
+            budgetMs: chronoMs,
+            stallMs: Math.max(60_000, Math.round(stallMin * 60_000)),
+            onSlow: () =>
+              emit(
+                "warn",
+                `⏱️ LTA ${lta.ltaRef} is slower than expected (over ~${Math.round(expectedMin)} min) but a DUM completed recently — no alert. ` +
+                  `It will be reported only if no DUM completes for ${stallMin} min.`,
+              ),
+            onStuck: (idleMs) => {
+              chronoTimers.delete(lta.ltaRef);
+              const idleMin = Math.round(idleMs / 60_000);
+              emit(
+                "warn",
+                `⏱️ Chrono alert for LTA ${lta.ltaRef}: over ~${Math.round(expectedMin)} min and no DUM completed for ${idleMin} min — sending "stuck" notifications`,
+              );
+              sendWhatsApp(
+                `⏱️ PROBLEM - LTA ${lta.ltaRef} (${scope}) looks stuck: ` +
+                  `not finished after ~${Math.round(expectedMin)} min and no DUM completed for ${idleMin} min. ` +
+                  `The process may be stuck, stopped, or missing DUMs — please check.`,
+                emit,
+              ).catch(() => {});
+              // Also email the failure with a screenshot of the current screen.
+              notifyLtaFailure({
+                ltaRef: lta.ltaRef,
+                dumCount,
+                reason:
+                  `LTA ${lta.ltaRef} (${scope}) looks stuck — not finished after ` +
+                  `~${Math.round(expectedMin)} min and no DUM completed for ${idleMin} min. ` +
+                  `The process may be stuck or stopped.`,
+                onLog: emit,
+              }).catch(() => {});
+            },
+          }),
         );
         emit(
           "info",
@@ -2599,7 +2667,7 @@ export const runSigningJob = async ({
     }
   } finally {
     // Clear any still-pending chrono watchdogs (e.g. on job abort / error).
-    for (const t of chronoTimers.values()) clearTimeout(t);
+    for (const t of chronoTimers.values()) t.clear();
     chronoTimers.clear();
   }
 

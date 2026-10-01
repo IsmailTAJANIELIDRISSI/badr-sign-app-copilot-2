@@ -55,6 +55,30 @@ const getTransporter = async (onLog = noopLog) => {
   return _transporter;
 };
 
+const MB = 1024 * 1024;
+const toMb = (bytes) => (bytes / MB).toFixed(1);
+
+/**
+ * Pack attachments, in order, into groups whose total size stays under
+ * `maxBytes`. A single file bigger than the budget gets a group of its own.
+ */
+export const splitAttachmentsBySize = (attachments, maxBytes) => {
+  const parts = [];
+  let current = [];
+  let currentBytes = 0;
+  for (const att of attachments) {
+    if (current.length && currentBytes + att.size > maxBytes) {
+      parts.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(att);
+    currentBytes += att.size;
+  }
+  if (current.length) parts.push(current);
+  return parts;
+};
+
 /**
  * Send the "LTA READY" notification email.
  *
@@ -62,7 +86,13 @@ const getTransporter = async (onLog = noopLog) => {
  * Body:     empty
  * Attach:   every signed PDF for the LTA.
  *
- * @returns {Promise<boolean>} true if the email was actually sent.
+ * SMTP servers cap the message size (Gmail: ~25 MB of attachments) and answer
+ * "552 5.3.4 message exceeded size limits" above it. So when the PDFs total more
+ * than config.email.maxAttachMb the LTA goes out as several emails, subject
+ * suffixed "[1/N]" ... "[N/N]". Each part that is sent leaves a marker file in
+ * the LTA folder, so a re-run after a partial failure only sends what is missing.
+ *
+ * @returns {Promise<boolean>} true if the email (every part of it) was sent.
  */
 export const sendLtaReadyEmail = async ({ ltaRef, dumCount, pdfPaths, onLog = noopLog }) => {
   const transporter = await getTransporter(onLog);
@@ -72,7 +102,8 @@ export const sendLtaReadyEmail = async ({ ltaRef, dumCount, pdfPaths, onLog = no
   const attachments = [];
   for (const p of pdfPaths || []) {
     if (p && (await fs.pathExists(p))) {
-      attachments.push({ filename: path.basename(p), path: p });
+      const { size } = await fs.stat(p);
+      attachments.push({ filename: path.basename(p), path: p, size });
     }
   }
 
@@ -81,26 +112,69 @@ export const sendLtaReadyEmail = async ({ ltaRef, dumCount, pdfPaths, onLog = no
     return false;
   }
 
-  const subject = `MAWB ${ltaRef} (${dumCount} DUM)`;
+  const baseSubject = `MAWB ${ltaRef} (${dumCount} DUM)`;
+  const maxBytes = config.email.maxAttachMb * MB;
+  const totalBytes = attachments.reduce((sum, a) => sum + a.size, 0);
+  const parts = splitAttachmentsBySize(attachments, maxBytes);
+  const isSplit = parts.length > 1;
+  const folder = path.dirname(attachments[0].path);
 
-  try {
-    await transporter.sendMail({
-      from: config.email.from,
-      to: config.email.to,
-      cc: config.email.cc,
-      subject,
-      text: "",
-      attachments,
-    });
+  if (isSplit) {
     onLog(
       "info",
-      `📧 Email sent for LTA ${ltaRef} — "${subject}" (${attachments.length} PDF attached) to ${config.email.to.length} recipient(s)`,
+      `📧 LTA ${ltaRef}: ${attachments.length} PDF = ${toMb(totalBytes)} MB, over the ${config.email.maxAttachMb} MB per-email limit — sending as ${parts.length} emails`,
     );
-    return true;
-  } catch (err) {
-    onLog("error", `📧 Email FAILED for LTA ${ltaRef}: ${err.message}`);
-    return false;
   }
+
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i];
+    const partBytes = part.reduce((sum, a) => sum + a.size, 0);
+    const label = `${i + 1}/${parts.length}`;
+    const subject = isSplit ? `${baseSubject} [${label}]` : baseSubject;
+    const partMarker = path.join(folder, `.email_sent_part_${i + 1}of${parts.length}`);
+
+    if (isSplit && (await fs.pathExists(partMarker))) {
+      onLog("info", `📧 Email part ${label} for LTA ${ltaRef} already sent previously — skipping`);
+      continue;
+    }
+    if (partBytes > maxBytes) {
+      onLog(
+        "warn",
+        `📧 "${part[0].filename}" alone is ${toMb(partBytes)} MB, over the ${config.email.maxAttachMb} MB per-email limit — the mail server may refuse it`,
+      );
+    }
+
+    try {
+      await transporter.sendMail({
+        from: config.email.from,
+        to: config.email.to,
+        cc: config.email.cc,
+        subject,
+        text: isSplit
+          ? `Partie ${label} — ${part.length} PDF sur ${attachments.length} (de « ${part[0].filename} » à « ${part[part.length - 1].filename} »).`
+          : "",
+        attachments: part.map(({ filename, path: filePath }) => ({ filename, path: filePath })),
+      });
+      onLog(
+        "info",
+        `📧 Email sent for LTA ${ltaRef} — "${subject}" (${part.length} PDF attached, ${toMb(partBytes)} MB) to ${config.email.to.length} recipient(s)`,
+      );
+      if (isSplit) {
+        await fs.writeFile(partMarker, new Date().toISOString()).catch(() => {});
+      }
+    } catch (err) {
+      const tooBig = err.responseCode === 552 || /5\.3\.4|size limit/i.test(err.message);
+      onLog(
+        "error",
+        `📧 Email FAILED for LTA ${ltaRef}${isSplit ? ` (part ${label})` : ""}: ${err.message}` +
+          (tooBig
+            ? ` — message too big for the mail server (${toMb(partBytes)} MB of PDFs); lower EMAIL_MAX_ATTACH_MB in .env and re-run`
+            : ""),
+      );
+      return false;
+    }
+  }
+  return true;
 };
 
 // ── Failure notification state ───────────────────────────────────────────────
