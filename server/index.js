@@ -572,15 +572,33 @@ try {
   Write-Output ('DEBUG=Target account match: ' + $acctMatch + '  |  Target sender: ' + $sender)
   # Pick the Inbox of the account whose SMTP matches $acctMatch (equals or ends-with).
   $store = $null
+  $acct = $null
   foreach ($a in $ns.Accounts) {
     $sm = ''
     try { $sm = $a.SmtpAddress } catch {}
     if ($sm) {
       $sm2 = $sm.ToLower()
-      if ($sm2 -eq $acctMatch -or $sm2.EndsWith($acctMatch)) { $store = $a.DeliveryStore; Write-Output ('DEBUG=Matched account: ' + $sm); break }
+      if ($sm2 -eq $acctMatch -or $sm2.EndsWith($acctMatch)) { $store = $a.DeliveryStore; $acct = $a; Write-Output ('DEBUG=Matched account: ' + $sm); break }
     }
   }
   if ($store -eq $null) { throw ('Aucun compte Outlook ne correspond a ' + $acctMatch) }
+
+  # WHY a copy can be stale: the matched account's connection mode
+  # (OlExchangeConnectionMode: 100/200 offline, 300/400 disconnected, 500-700
+  # cached+connected, 800 online — per ACCOUNT, the namespace value only covers
+  # the profile's default account), the "Work offline" flag, whether classic
+  # has any window (0 = hidden background instance, which cannot show a
+  # sign-in prompt), and since when the OUTLOOK.EXE process has been running.
+  $mode = ''
+  try { $mode = [string][int]$acct.ExchangeConnectionMode } catch {}
+  $offline = ''
+  try { $offline = [string]$ns.Offline } catch {}
+  $windows = ''
+  try { $windows = [string]$ol.Explorers.Count } catch {}
+  $started = ''
+  try { $started = (Get-Process -Name OUTLOOK -ErrorAction Stop | Sort-Object StartTime | Select-Object -First 1).StartTime.ToString('yyyy-MM-dd HH:mm') } catch {}
+  Write-Output ('DEBUG=Classic Outlook state: connectionMode=' + $mode + ' workOffline=' + $offline + ' windowsOpen=' + $windows + ' processStarted=' + $started)
+  Write-Output ('OUTLOOK_STATE=' + $mode + '|' + $offline + '|' + $windows + '|' + $started)
   $inbox = $store.GetDefaultFolder(6)
   $newest = Get-InboxNewest $inbox
   Write-Output ('DEBUG=Inbox store=' + $inbox.Store.DisplayName + ' totalItems=' + $inbox.Items.Count + ' newestMail=' + $newest)
@@ -709,6 +727,14 @@ try {
         const inbox = state
           ? { outlookWasOpen: state[1] === "True", newestMail: state[2].trim() }
           : null;
+        // ...and why classic Outlook may not be syncing (see OUTLOOK_STATE).
+        const ol = out.match(/^OUTLOOK_STATE=(\d*)\|(\w*)\|(\d*)\|(.*)$/im);
+        if (inbox && ol) {
+          inbox.connectionMode = ol[1] ? Number(ol[1]) : null;
+          inbox.workOffline = ol[2] === "True";
+          inbox.windowsOpen = ol[3] === "" ? null : Number(ol[3]);
+          inbox.processStarted = ol[4].trim();
+        }
         logger.info({ count: refs.length, savedCount, inbox }, "fetch-xlsx done");
         res.json({ ok: true, dest, savedCount, results, debug, inbox });
       },

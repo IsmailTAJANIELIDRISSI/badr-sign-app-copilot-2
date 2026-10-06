@@ -119,6 +119,24 @@ function App() {
     return { hours, label };
   };
 
+  // Most likely reason classic Outlook's mailbox copy is stale, from the state
+  // the import script reports (OlExchangeConnectionMode, offline flag, windows).
+  const outlookStaleCause = (inbox) => {
+    const mode = inbox?.connectionMode;
+    if (inbox?.workOffline)
+      return "Outlook classique est en mode « Travailler hors connexion » (onglet Envoi/Réception).";
+    if (mode === 100 || mode === 200)
+      return "Outlook classique est hors connexion.";
+    if (mode === 300 || mode === 400)
+      return "Outlook classique est déconnecté du serveur (il attend sans doute une reconnexion / un mot de passe).";
+    if (inbox?.windowsOpen === 0)
+      return `Outlook classique tourne en arrière-plan sans fenêtre${inbox.processStarted ? ` depuis le ${inbox.processStarted}` : ""} — il ne peut pas afficher de demande de connexion. Fermez-le (Gestionnaire des tâches → OUTLOOK.EXE) puis ouvrez Outlook classique normalement.`;
+    // Connected yet not receiving: seen on the device when classic Outlook's
+    // "Éléments envoyés" hit its item limit (it then also keeps sent mail in
+    // the Outbox). Classic shows the reason itself in a dialog.
+    return "Outlook classique est connecté mais ne reçoit plus — ouvrez-le : il affiche la raison (ex. « Éléments envoyés contient le nombre maximal d'éléments » → archivez/déplacez des éléments envoyés).";
+  };
+
   // One toast per outcome, so 1 or 20 missing refs never flood the screen.
   // `inbox.newestMail` = newest mail in the mailbox copy the app searched
   // (classic Outlook's). On a busy inbox, nothing new for >12 h means classic
@@ -144,7 +162,8 @@ function App() {
           ? ""
           : stale
             ? `⚠ Outlook classique n'est plus à jour : le dernier email qu'il voit date du ${inbox.newestMail} (${age.label}). ` +
-              "Les emails arrivés depuis sont invisibles pour l'app — ouvrez Outlook classique, vérifiez qu'il est connecté et laissez-le se synchroniser."
+              "Les emails arrivés depuis sont invisibles pour l'app. " +
+              `Cause probable : ${outlookStaleCause(inbox)}`
             : `Dernier email visible par l'app : ${inbox.newestMail}${age?.label ? ` (${age.label})` : ""}. ` +
               "Si l'email est plus récent, ouvrez Outlook classique, laissez-le se synchroniser, puis relancez.",
       });
