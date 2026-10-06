@@ -138,21 +138,37 @@ function App() {
   };
 
   // Most likely reason classic Outlook's mailbox copy is stale, from the state
-  // the import script reports (OlExchangeConnectionMode, offline flag, windows).
+  // the import script reports (OlExchangeConnectionMode, offline flag, local
+  // data file size, windows). Order matters: a connected Outlook (>= 500) with
+  // no window is NOT a sign-in problem — seen on the device (700, no window,
+  // still stuck), where classic's own dialog said "Éléments envoyés" was full.
   const outlookStaleCause = (inbox) => {
     const mode = inbox?.connectionMode;
+    const outbox =
+      inbox?.outboxItems > 0
+        ? ` ${inbox.outboxItems} email(s) sont aussi bloqués dans sa Boîte d'envoi.`
+        : "";
     if (inbox?.workOffline)
       return "Outlook classique est en mode « Travailler hors connexion » (onglet Envoi/Réception).";
     if (mode === 100 || mode === 200)
       return "Outlook classique est hors connexion.";
     if (mode === 300 || mode === 400)
       return "Outlook classique est déconnecté du serveur (il attend sans doute une reconnexion / un mot de passe).";
+    if (inbox?.dataFileGb != null && inbox.dataFileGb >= 0.95 * inbox.dataFileLimitGb)
+      return (
+        `Le fichier de données d'Outlook classique est plein (${inbox.dataFileGb} Go sur ${inbox.dataFileLimitGb} Go) : ` +
+        "il ne peut plus rien recevoir. Il faut libérer de la place ou recréer ce fichier." +
+        outbox
+      );
+    if (mode >= 500)
+      return (
+        "Outlook classique est connecté mais n'enregistre plus les nouveaux emails — ouvrez-le : il affiche la raison " +
+        "(ex. « Éléments envoyés contient le nombre maximal d'éléments » → archivez/déplacez des éléments envoyés)." +
+        outbox
+      );
     if (inbox?.windowsOpen === 0)
       return `Outlook classique tourne en arrière-plan sans fenêtre${inbox.processStarted ? ` depuis le ${inbox.processStarted}` : ""} — il ne peut pas afficher de demande de connexion. Fermez-le (Gestionnaire des tâches → OUTLOOK.EXE) puis ouvrez Outlook classique normalement.`;
-    // Connected yet not receiving: seen on the device when classic Outlook's
-    // "Éléments envoyés" hit its item limit (it then also keeps sent mail in
-    // the Outbox). Classic shows the reason itself in a dialog.
-    return "Outlook classique est connecté mais ne reçoit plus — ouvrez-le : il affiche la raison (ex. « Éléments envoyés contient le nombre maximal d'éléments » → archivez/déplacez des éléments envoyés).";
+    return "Outlook classique ne se met plus à jour — ouvrez-le : il affiche la raison." + outbox;
   };
 
   // One toast per outcome, so 1 or 20 missing refs never flood the screen.

@@ -4,6 +4,20 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-06 — Device: classic Outlook CONNECTED (700) but still stuck → diagnostic now reports its data file
+
+**Data from the device:** `connectionMode=700 workOffline=False windowsOpen=0`, `newestMail=2026-10-02 13:10`, `totalItems=6458` (identical on every run). So classic **is connected to Exchange** and still stores no new mail → not a sign-in/connection problem. It fits classic's own dialog ("Éléments envoyés contient le nombre maximal d'éléments… les messages envoyés seront enregistrés dans la Boîte d'envoi"): classic can't write new items locally.
+
+**Bug fixed (`src/App.jsx`):** the toast's "Cause probable" checked `windowsOpen=0` before the connection mode, so it told the operator classic was hidden and couldn't show a sign-in prompt — wrong for a connected Outlook. New order: work-offline → offline (100/200) → disconnected (300/400) → **data file ≥ 95 % of its limit** → **connected (≥ 500) but not storing new mail** (points to classic's own error dialog, e.g. Éléments envoyés full) → hidden window → fallback. Appends "N email(s) bloqués dans sa Boîte d'envoi" when the Outbox isn't empty.
+
+**New diagnostic (`server/index.js`):** `DEBUG=Classic data file: <.ost path> size=<GB> limit=<GB> | Sent Items=<n> | Outbox=<n>` + `DATAFILE_STATE=` → `inbox.dataFileGb / dataFileLimitGb (MaxLargeFileSize, default 50) / sentItems / outboxItems`. Sizes formatted with the invariant culture (a French locale would print `4,1`). Verified on this PC (read-only, fake ref): `size=4.1GB limit=50GB (default) | Sent Items=5 | Outbox=0`, parsed by the server regex; script parses; `vite build` OK.
+
+**Next on the device:** pull + relaunch, one import, read the `Classic data file` line. If the .ost is near its limit or Sent Items is huge: free space / archive Sent Items, or rebuild the .ost (close Outlook, rename the .ost, reopen → fresh download from the server; anything only in the local Outbox is lost). The Gmail-IMAP import (no Outlook dependency) remains the durable option — awaiting the user's go-ahead.
+
+**Files changed:** `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-10-06 — "Outlook classique / Nouvel Outlook" switch for the email buttons + shorter futile sync wait
 
 **Problem:** on the device the user works in the **new** Outlook, but "Envoyer par email" / "Envoyer tous" always opened a **classic** Outlook draft. Changing the Windows default mail app doesn't help: the endpoint drives classic Outlook directly through COM (which succeeds as long as classic is installed) and only used the default mail app (`mailto:`) as a fallback when COM failed. The new Outlook has no automation interface (no COM, no command-line attach), so it can never get a draft with the PDFs pre-attached.

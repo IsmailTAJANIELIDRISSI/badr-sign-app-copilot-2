@@ -616,6 +616,31 @@ try {
   $newest = Get-InboxNewest $inbox
   Write-Output ('DEBUG=Inbox store=' + $inbox.Store.DisplayName + ' totalItems=' + $inbox.Items.Count + ' newestMail=' + $newest)
 
+  # Classic's local data file (.ost): a full one stops new mail from being
+  # stored even while connected (device: connectionMode=700 yet stuck since
+  # 02/10, plus "Éléments envoyés contient le nombre maximal d'éléments").
+  # Size vs MaxLargeFileSize (MB, default 50 GB), and Sent Items / Outbox counts.
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $ostPath = ''
+  $ostGb = ''
+  try {
+    $ostPath = [string]$store.FilePath
+    if ($ostPath -and (Test-Path -LiteralPath $ostPath)) { $ostGb = [math]::Round((Get-Item -LiteralPath $ostPath).Length / 1GB, 1).ToString($inv) }
+  } catch {}
+  $limitGb = ''
+  foreach ($k in @('HKCU:\\Software\\Policies\\Microsoft\\Office\\16.0\\Outlook\\PST', 'HKCU:\\Software\\Microsoft\\Office\\16.0\\Outlook\\PST')) {
+    try {
+      $v = (Get-ItemProperty -Path $k -Name MaxLargeFileSize -ErrorAction Stop).MaxLargeFileSize
+      if ($v) { $limitGb = [math]::Round($v / 1024, 1).ToString($inv); break }
+    } catch {}
+  }
+  $sentCount = ''
+  try { $sentCount = [string]$store.GetDefaultFolder(5).Items.Count } catch {}
+  $outboxCount = ''
+  try { $outboxCount = [string]$store.GetDefaultFolder(4).Items.Count } catch {}
+  Write-Output ('DEBUG=Classic data file: ' + $ostPath + ' size=' + $ostGb + 'GB limit=' + $(if ($limitGb) { $limitGb + 'GB' } else { '50GB (default)' }) + ' | Sent Items=' + $sentCount + ' | Outbox=' + $outboxCount)
+  Write-Output ('DATAFILE_STATE=' + $ostGb + '|' + $limitGb + '|' + $sentCount + '|' + $outboxCount)
+
   $foundByRef = @{}
   foreach ($ref in $refs) {
     Find-RefMail $inbox $ref $true
@@ -756,6 +781,15 @@ try {
           inbox.workOffline = ol[2] === "True";
           inbox.windowsOpen = ol[3] === "" ? null : Number(ol[3]);
           inbox.processStarted = ol[4].trim();
+        }
+        // ...and how full classic's local data file is (see DATAFILE_STATE).
+        const df = out.match(/^DATAFILE_STATE=([\d.]*)\|([\d.]*)\|(\d*)\|(\d*)\s*$/im);
+        if (inbox && df) {
+          const num = (s) => (s === "" ? null : Number(s));
+          inbox.dataFileGb = num(df[1]);
+          inbox.dataFileLimitGb = num(df[2]) ?? 50;
+          inbox.sentItems = num(df[3]);
+          inbox.outboxItems = num(df[4]);
         }
         logger.info({ count: refs.length, savedCount, inbox }, "fetch-xlsx done");
         res.json({ ok: true, dest, savedCount, results, debug, inbox });
