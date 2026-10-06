@@ -106,7 +106,9 @@ function App() {
     ["saved", "no_xlsx", "error"].includes(res.status) ? res.status : "not_found";
 
   // One toast per outcome, so 1 or 20 missing refs never flood the screen.
-  const notifyImportResults = (results) => {
+  // `inbox.newestMail` = newest mail in the mailbox copy the app searched
+  // (classic Outlook's) — shown so a stale copy is obvious at a glance.
+  const notifyImportResults = (results, inbox) => {
     const refsOf = (status) =>
       results.filter((r) => importStatusOf(r) === status).map((r) => r.ref);
     const missing = refsOf("not_found");
@@ -120,6 +122,10 @@ function App() {
             ? "Référence pas trouvée en mail"
             : `${missing.length} références pas trouvées en mail`,
         lines: missing.map((ref) => ({ ref, text: "pas trouvé en mail" })),
+        detail: inbox?.newestMail
+          ? `Dernier email visible par l'app : ${inbox.newestMail}. ` +
+            "Si l'email est plus récent, ouvrez Outlook classique, laissez-le se synchroniser, puis relancez."
+          : "",
       });
     }
     if (noXlsx.length) {
@@ -165,7 +171,7 @@ function App() {
       if (r.ok && data.ok) {
         const results = data.results || [];
         setImportResults(results);
-        notifyImportResults(results);
+        notifyImportResults(results, data.inbox);
         if (data.savedCount > 0) refresh(); // new files → reload the LTA list
       } else {
         failImport(data.reason || "Échec.");

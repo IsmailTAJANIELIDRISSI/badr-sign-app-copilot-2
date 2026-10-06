@@ -4,6 +4,29 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-06 — Import tab: "pas trouvé en mail" for a mail that IS in the inbox (new Outlook)
+
+**Problem:** ref `065-45991816` → `Aucun email "complet" avec piece .xlsx … Pas trouvé en mail`, yet the mail (`LTA Complet - 7eme LTA - 065-45991816`, `generated_excel - 065-45991816.xlsx` attached, received 06/10 15:25) is in the Inbox as shown by the **new Outlook**. The user had just switched from classic to new Outlook on that machine.
+
+**Root cause (inferred — that machine's diagnostic wasn't available):** the import reads the mailbox through **COM, which only exists in classic Outlook**. The new Outlook (`olk.exe`) has no COM and its own storage. Once classic Outlook isn't run any more, **its local copy of the mailbox (OST) stops syncing**. COM then starts classic Outlook in the background and searches that stale copy immediately → recent mail is missing. The result was `not_found` (not `FATAL`/"Import impossible"), so COM, the account match and the Inbox all worked — the search just ran on a copy without that mail. The mail itself matches every rule (subject has the ref + "Complet", `.xlsx` named with the ref).
+
+**Fix (`server/index.js` — fetch-xlsx script):**
+
+- Records whether classic Outlook **was already open** before COM connects.
+- If it wasn't **and** some refs are missing: `SendAndReceive`, then re-searches the missing refs every 5 s for up to `INBOX_SYNC_WAIT_SEC` (default 45; `0` = off) while classic syncs. No wait when classic is already open (its copy is current) or when every ref is found.
+- Reports how fresh the searched copy is: `DEBUG … newestMail=<date>` and a new `INBOX_STATE=<wasOpen>|<newest>` line → JSON `inbox: { outlookWasOpen, newestMail }`. `execFile` timeout raised to 90 s + the wait.
+- Refactor: per-ref search moved into PS functions `Find-RefMail` / `Get-InboxNewest`. The match result goes through `$script:found`, not a return value — a PS function's `Write-Output` DEBUG lines would otherwise be mixed into the returned value.
+
+**Frontend (`src/App.jsx`):** the red "pas trouvé en mail" toast now adds `Dernier email visible par l'app : <date>` + "if the mail is newer, open classic Outlook, let it sync, retry" — a stale copy is obvious at a glance.
+
+**Verified:** the generated script against a mocked inbox (forward + gmail original + unrelated MAWB mail → picks the gmail original; only DEBUG lines in the output; missing ref → null; newest = 17:14); against this machine's real classic Outlook (read-only, fake ref, already open → no wait, `INBOX_STATE=True|2026-10-06 16:15`, 2.6 s); and the wait path forced (`wasRunning=$false`, SendAndReceive stubbed, 10 s → loop ran, `stillMissing=1`, 12.1 s). Nothing was saved. `vite build` OK. **Not verified:** that a background-started classic Outlook syncs within 45 s on the new-Outlook machine — check "Détails du diagnostic" there (`classic Outlook already open: False`, `newestMail=…`, `found after sync`).
+
+**If it still says not found there:** if `newestMail` is old, switch that machine back to classic Outlook once (turn off the "Nouvel Outlook" toggle), let it sync, retry; keeping classic open is the reliable setup. The only client-independent alternative is Microsoft Graph (needs an Azure app registration) — not done.
+
+**Files changed:** `server/index.js`, `src/App.jsx`, `.env.example`.
+
+---
+
 ## 2026-09-30 — Fix: false "Signature Failed" email mid-LTA (chrono fired on a slow but healthy run)
 
 **Problem:** LTA `607-54315402` (17 DUM) sent `Signature Failed LTA N°607-54315402 (17 DUM)` at 16:56:25 while DUM 16 was being signed normally — nothing had failed and the run carried on.

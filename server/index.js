@@ -439,7 +439,9 @@ try {
 });
 
 // ── Fetch DUM .xlsx from the Outlook inbox by LTA ref ──────────────────────
-// Classic-Outlook-only (COM), no SMTP/IMAP/Graph. For each ref, search the
+// Classic-Outlook-only (COM), no SMTP/IMAP/Graph. The NEW Outlook has no COM;
+// COM then drives the (still installed) classic Outlook, whose local copy of
+// the mailbox only syncs while classic runs — see INBOX_SYNC_WAIT_SEC. For each ref, search the
 // default Inbox for a mail whose sender SMTP == INBOX_SENDER and whose subject
 // contains the ref, then save each .xlsx attachment into the dums input folder
 // so the app auto-detects the LTA. Paths are absolute (same reason as the email
@@ -458,6 +460,15 @@ const INBOX_ACCOUNT =
 const SUBJECT_KEYWORD = (
   process.env.INBOX_SUBJECT_KEYWORD || "complet"
 ).toLowerCase();
+// COM only reaches CLASSIC Outlook's local copy of the mailbox. When the user
+// works in the NEW Outlook, classic isn't running, so that copy stops syncing:
+// COM starts classic in the background and would search a stale inbox at once.
+// In that case (classic was not already running) and only if some refs are
+// missing, keep re-searching for up to this many seconds while classic syncs.
+const INBOX_SYNC_WAIT_SEC = Number.parseInt(
+  process.env.INBOX_SYNC_WAIT_SEC || "45",
+  10,
+);
 
 app.post("/api/lta/fetch-xlsx", async (req, res) => {
   const refs = Array.isArray(req.body?.refs)
@@ -481,11 +492,79 @@ $sender = ${psq(INBOX_SENDER)}.ToLower()
 $acctMatch = ${psq(INBOX_ACCOUNT)}.ToLower()
 $keyword = ${psq(SUBJECT_KEYWORD)}
 $refs = ${refsArray}
+$syncWaitSec = ${Math.max(0, INBOX_SYNC_WAIT_SEC) || 0}
 $PR_SMTP = 'http://schemas.microsoft.com/mapi/proptag/0x5D01001F'
+
+# Newest mail in the Inbox, as seen by classic Outlook. If it is hours/days old,
+# classic Outlook's local copy is not up to date (typical with the new Outlook).
+function Get-InboxNewest($inbox) {
+  try {
+    $all = $inbox.Items
+    $all.Sort('[ReceivedTime]', $true)
+    $first = $all.GetFirst()
+    if ($first) { return $first.ReceivedTime.ToString('yyyy-MM-dd HH:mm') }
+  } catch {}
+  return ''
+}
+
+# Best mail for a ref: subject contains the ref AND the keyword ("complet") AND
+# the mail carries an .xlsx whose name contains the ref. Sender is NOT a filter
+# (the email often arrives as a colleague's forward) — but if Ismail's original
+# copy is present we prefer it over a forward. $verbose = log the candidates.
+# The result goes in $script:found, NOT a return value: the DEBUG lines are
+# function output, so returning would mix them into the assigned value.
+function Find-RefMail($inbox, $ref, $verbose) {
+  $script:found = $null
+  $safe = $ref -replace "'","''"
+  $filter = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' LIKE ' + [char]39 + '%' + $safe + '%' + [char]39
+  $usedRestrict = $true
+  try { $items = $inbox.Items.Restrict($filter) } catch { $items = $inbox.Items; $usedRestrict = $false }
+  try { $items.Sort('[ReceivedTime]', $true) } catch {}
+  $matchCount = 0
+  try { $matchCount = $items.Count } catch {}
+  if ($verbose) { Write-Output ('DEBUG=[' + $ref + '] subject-restrict matched=' + $matchCount + ' restrictUsed=' + $usedRestrict) }
+  $best = $null
+  $bestGmail = $false
+  $shown = 0
+  foreach ($m in $items) {
+    try { if ($m.Class -ne 43) { continue } } catch { continue }
+    $subj = ''
+    try { $subj = $m.Subject } catch {}
+    if ($subj -notlike ('*' + $ref + '*')) { continue }
+    $smtp = ''
+    try { $smtp = $m.PropertyAccessor.GetProperty($PR_SMTP) } catch {}
+    if (-not $smtp) { try { $smtp = $m.SenderEmailAddress } catch {} }
+    $attCount = 0
+    try { $attCount = $m.Attachments.Count } catch {}
+    $hasXlsx = $false
+    foreach ($att in $m.Attachments) {
+      $fn = ''
+      try { $fn = $att.FileName } catch {}
+      if ($fn -match '\\.xlsx$' -and $fn.Contains($ref)) { $hasXlsx = $true; break }
+    }
+    $hasKeyword = $subj.ToLower().Contains($keyword)
+    if ($verbose -and $shown -lt 15) {
+      Write-Output ('DEBUG=[' + $ref + '] candidate sender=' + $smtp + ' atts=' + $attCount + ' xlsx=' + $hasXlsx + ' keyword=' + $hasKeyword + ' subj=' + $subj)
+      $shown++
+    }
+    if (-not ($hasKeyword -and $hasXlsx)) { continue }
+    $isGmail = ($smtp -and $smtp.ToLower() -eq $sender)
+    if ($isGmail) { $best = $m; $bestGmail = $true; break }
+    if ($best -eq $null) { $best = $m }
+  }
+  if ($best -ne $null) {
+    Write-Output ('DEBUG=[' + $ref + '] chosen fromGmail=' + $bestGmail + ' subj=' + $best.Subject)
+  }
+  $script:found = $best
+}
+
 try {
+  # Was classic Outlook already open? If not, COM starts it in the background
+  # and its local mailbox copy may be stale until it has synced.
+  $wasRunning = [bool](Get-Process -Name OUTLOOK -ErrorAction SilentlyContinue)
   $ol = New-Object -ComObject Outlook.Application
   $ns = $ol.GetNamespace('MAPI')
-  Write-Output 'DEBUG=Outlook COM connected'
+  Write-Output ('DEBUG=Outlook COM connected (classic Outlook already open: ' + $wasRunning + ')')
   # List every account so we can see whether the medafrica one exists.
   $accts = @()
   foreach ($a in $ns.Accounts) { try { if ($a.SmtpAddress) { $accts += $a.SmtpAddress } } catch {} }
@@ -503,51 +582,42 @@ try {
   }
   if ($store -eq $null) { throw ('Aucun compte Outlook ne correspond a ' + $acctMatch) }
   $inbox = $store.GetDefaultFolder(6)
-  Write-Output ('DEBUG=Inbox store=' + $inbox.Store.DisplayName + ' totalItems=' + $inbox.Items.Count)
+  $newest = Get-InboxNewest $inbox
+  Write-Output ('DEBUG=Inbox store=' + $inbox.Store.DisplayName + ' totalItems=' + $inbox.Items.Count + ' newestMail=' + $newest)
+
+  $foundByRef = @{}
   foreach ($ref in $refs) {
-    $safe = $ref -replace "'","''"
-    $filter = '@SQL=' + [char]34 + 'urn:schemas:httpmail:subject' + [char]34 + ' LIKE ' + [char]39 + '%' + $safe + '%' + [char]39
-    $usedRestrict = $true
-    try { $items = $inbox.Items.Restrict($filter) } catch { $items = $inbox.Items; $usedRestrict = $false }
-    try { $items.Sort('[ReceivedTime]', $true) } catch {}
-    $matchCount = 0
-    try { $matchCount = $items.Count } catch {}
-    Write-Output ('DEBUG=[' + $ref + '] subject-restrict matched=' + $matchCount + ' restrictUsed=' + $usedRestrict)
-    # Selection rule: subject contains the ref AND the keyword ("complet") AND
-    # the mail carries an .xlsx whose name contains the ref. Sender is NOT a
-    # filter (the email often arrives as a colleague's forward) — but if Ismail's
-    # original copy is present we prefer it over a forward.
-    $best = $null
-    $bestGmail = $false
-    $shown = 0
-    foreach ($m in $items) {
-      try { if ($m.Class -ne 43) { continue } } catch { continue }
-      $subj = ''
-      try { $subj = $m.Subject } catch {}
-      if ($subj -notlike ('*' + $ref + '*')) { continue }
-      $smtp = ''
-      try { $smtp = $m.PropertyAccessor.GetProperty($PR_SMTP) } catch {}
-      if (-not $smtp) { try { $smtp = $m.SenderEmailAddress } catch {} }
-      $attCount = 0
-      try { $attCount = $m.Attachments.Count } catch {}
-      $hasXlsx = $false
-      foreach ($att in $m.Attachments) {
-        $fn = ''
-        try { $fn = $att.FileName } catch {}
-        if ($fn -match '\\.xlsx$' -and $fn.Contains($ref)) { $hasXlsx = $true; break }
+    Find-RefMail $inbox $ref $true
+    if ($script:found -ne $null) { $foundByRef[$ref] = $script:found }
+  }
+
+  # Classic Outlook was started just now by COM (the user works in the new
+  # Outlook): its local mailbox copy may be days behind. Ask it to sync, then
+  # re-search the missing refs every 5 s until found or $syncWaitSec elapses.
+  $missing = @($refs | Where-Object { -not $foundByRef.ContainsKey($_) })
+  if ($missing.Count -gt 0 -and -not $wasRunning -and $syncWaitSec -gt 0) {
+    Write-Output ('DEBUG=Classic Outlook was not open - syncing, re-searching ' + $missing.Count + ' ref(s) for up to ' + $syncWaitSec + 's')
+    try { $ns.SendAndReceive($false) } catch {}
+    $deadline = (Get-Date).AddSeconds($syncWaitSec)
+    while ($missing.Count -gt 0 -and (Get-Date) -lt $deadline) {
+      Start-Sleep -Seconds 5
+      foreach ($ref in $missing) {
+        Find-RefMail $inbox $ref $false
+        if ($script:found -ne $null) {
+          $foundByRef[$ref] = $script:found
+          Write-Output ('DEBUG=[' + $ref + '] found after sync')
+        }
       }
-      $hasKeyword = $subj.ToLower().Contains($keyword)
-      if ($shown -lt 15) {
-        Write-Output ('DEBUG=[' + $ref + '] candidate sender=' + $smtp + ' atts=' + $attCount + ' xlsx=' + $hasXlsx + ' keyword=' + $hasKeyword + ' subj=' + $subj)
-        $shown++
-      }
-      if (-not ($hasKeyword -and $hasXlsx)) { continue }
-      $isGmail = ($smtp -and $smtp.ToLower() -eq $sender)
-      if ($isGmail) { $best = $m; $bestGmail = $true; break }
-      if ($best -eq $null) { $best = $m }
+      $missing = @($refs | Where-Object { -not $foundByRef.ContainsKey($_) })
     }
+    $newest = Get-InboxNewest $inbox
+    Write-Output ('DEBUG=After sync wait: newestMail=' + $newest + ' totalItems=' + $inbox.Items.Count + ' stillMissing=' + $missing.Count)
+  }
+  Write-Output ('INBOX_STATE=' + $wasRunning + '|' + $newest)
+
+  foreach ($ref in $refs) {
+    $best = $foundByRef[$ref]
     if ($best -ne $null) {
-      Write-Output ('DEBUG=[' + $ref + '] chosen fromGmail=' + $bestGmail + ' subj=' + $best.Subject)
       $saved = @()
       foreach ($att in $best.Attachments) {
         $fn = ''
@@ -590,7 +660,8 @@ try {
         "-File",
         scriptPath,
       ],
-      { timeout: 90000, windowsHide: true },
+      // 90 s for Outlook itself + the optional sync wait.
+      { timeout: 90000 + Math.max(0, INBOX_SYNC_WAIT_SEC || 0) * 1000, windowsHide: true },
       (err, stdout, stderr) => {
         fs.remove(scriptPath).catch(() => {});
         const out = String(stdout || "");
@@ -632,8 +703,14 @@ try {
             results.push({ ref, status: "not_found", detail: "Aucune réponse" });
         }
         const savedCount = results.filter((r) => r.status === "saved").length;
-        logger.info({ count: refs.length, savedCount }, "fetch-xlsx done");
-        res.json({ ok: true, dest, savedCount, results, debug });
+        // How fresh is the mailbox copy COM searched? Lets the UI say "the app
+        // only sees mail up to <date>" when a ref is missing.
+        const state = out.match(/^INBOX_STATE=(True|False)\|(.*)$/im);
+        const inbox = state
+          ? { outlookWasOpen: state[1] === "True", newestMail: state[2].trim() }
+          : null;
+        logger.info({ count: refs.length, savedCount, inbox }, "fetch-xlsx done");
+        res.json({ ok: true, dest, savedCount, results, debug, inbox });
       },
     );
   } catch (error) {
