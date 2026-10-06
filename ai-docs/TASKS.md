@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ⚠️ Import tab — classic Outlook on the device stopped syncing on 02/10 13:10 (2026-10-06, open)
+
+Diagnostic from the device confirmed it: classic Outlook **is open** but its newest mail is `2026-10-02 13:10` (4 days old), so every "LTA Complet" mail since then is invisible to the import. The not-found toast now says so explicitly when the newest mail is > 12 h old. **Action on the device:** get classic Outlook connected and synced (see PROGRESS.md), and check the `[File d'attente] MAWB 607-52812966 - (30 DUM)` mail stuck in the Outbox since Mon 21:22. **Decision pending:** stay on classic-Outlook COM, or import from the sending Gmail account over IMAP / Microsoft Graph so the import no longer depends on classic Outlook.
+
 ### ⚠️ Import tab + new Outlook — waits for classic Outlook to sync (2026-10-06, to validate)
 
 A mail visible in the **new Outlook** was reported "pas trouvé en mail": the import uses COM = **classic Outlook only**, and classic's local mailbox copy stops syncing once the user moves to the new Outlook. Now, when classic wasn't already open and refs are missing, the script triggers a sync and re-searches for up to `INBOX_SYNC_WAIT_SEC` (45 s); the not-found toast shows `Dernier email visible par l'app : <date>`. Verified on this machine (mocked inbox, real Outlook read-only, forced wait path). **To validate on the new-Outlook machine** via "Détails du diagnostic". If background sync isn't enough there: run classic Outlook, or move the import to Microsoft Graph (client-independent, needs Azure app registration). See PROGRESS.md.

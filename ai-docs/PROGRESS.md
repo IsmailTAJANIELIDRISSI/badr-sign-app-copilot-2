@@ -4,6 +4,22 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-06 — Import tab: diagnosis confirmed on the device — classic Outlook stuck since 02/10 13:10
+
+**Data from the device (Détails du diagnostic):** `classic Outlook already open: True`, account `mohamed.tyaybi@medafrica-log.com`, `totalItems=6458`, **`newestMail=2026-10-02 13:10`** — on 06/10. Refs `607-52812966`, `235-99203156`, `607-52812970` only matched Speedaf "IMPORT PRE-ALERT" mails from 29–30/09 (`keyword=False`). The `LTA Complet - 3eme LTA - 607-52812966` mail the user sees in the **new** Outlook arrived **02/10 22:45** — after classic's cut-off, so classic's copy doesn't have it.
+
+**Conclusion:** the search logic is fine; classic Outlook on that device **is running but no longer syncing** (stopped 02/10 13:10, around the switch to the new Outlook — likely disconnected / needs sign-in / offline, unconfirmed). The sync-wait added earlier doesn't apply (it only runs when classic wasn't open) and couldn't fix a disconnected classic anyway.
+
+**Also spotted in the user's screenshot:** `[File d'attente] MAWB 607-52812966 - (30 DUM)`, Lun 21:22, in **Boîte d'envoi** — queued, apparently never delivered. The `- (` subject format is the app's "Envoyer par email" button, which drafts through classic Outlook. To check on the device.
+
+**Change (`src/App.jsx`):** the not-found toast now states the age of classic's newest mail and, when it's > 12 h old, says plainly `⚠ Outlook classique n'est plus à jour : le dernier email qu'il voit date du 2026-10-02 13:10 (il y a 4 jours)…` instead of only giving a date the operator has to compare. `vite build` OK.
+
+**Open decision (user):** keep depending on classic Outlook on a device whose user lives in the new Outlook (Import + Envoyer par email both break silently when classic stops syncing), or read the "LTA Complet" mails from the sending Gmail account over IMAP (credentials already in `.env`; needs an IMAP npm package — note `electron/main.js` auto-pulls but does **not** run `npm install`), or Microsoft Graph (Azure app registration).
+
+**Files changed:** `src/App.jsx`.
+
+---
+
 ## 2026-10-06 — Import tab: "pas trouvé en mail" for a mail that IS in the inbox (new Outlook)
 
 **Problem:** ref `065-45991816` → `Aucun email "complet" avec piece .xlsx … Pas trouvé en mail`, yet the mail (`LTA Complet - 7eme LTA - 065-45991816`, `generated_excel - 065-45991816.xlsx` attached, received 06/10 15:25) is in the Inbox as shown by the **new Outlook**. The user had just switched from classic to new Outlook on that machine.

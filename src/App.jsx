@@ -105,9 +105,25 @@ function App() {
   const importStatusOf = (res) =>
     ["saved", "no_xlsx", "error"].includes(res.status) ? res.status : "not_found";
 
+  // Age of classic Outlook's newest mail ("2026-10-02 13:10", local time).
+  const formatInboxAge = (newestMail) => {
+    const t = new Date(String(newestMail).replace(" ", "T")).getTime();
+    if (!Number.isFinite(t)) return { hours: null, label: "" };
+    const hours = (Date.now() - t) / 3_600_000;
+    const label =
+      hours < 1
+        ? "il y a moins d'une heure"
+        : hours < 48
+          ? `il y a ${Math.round(hours)} h`
+          : `il y a ${Math.round(hours / 24)} jours`;
+    return { hours, label };
+  };
+
   // One toast per outcome, so 1 or 20 missing refs never flood the screen.
   // `inbox.newestMail` = newest mail in the mailbox copy the app searched
-  // (classic Outlook's) — shown so a stale copy is obvious at a glance.
+  // (classic Outlook's). On a busy inbox, nothing new for >12 h means classic
+  // Outlook has stopped syncing (seen when the user moved to the new Outlook:
+  // classic stuck 4 days behind) — say so plainly instead of just a date.
   const notifyImportResults = (results, inbox) => {
     const refsOf = (status) =>
       results.filter((r) => importStatusOf(r) === status).map((r) => r.ref);
@@ -115,6 +131,8 @@ function App() {
     const noXlsx = refsOf("no_xlsx");
     const saved = refsOf("saved");
     if (missing.length) {
+      const age = inbox?.newestMail ? formatInboxAge(inbox.newestMail) : null;
+      const stale = age?.hours != null && age.hours > 12;
       pushToast({
         tone: "error",
         title:
@@ -122,10 +140,13 @@ function App() {
             ? "Référence pas trouvée en mail"
             : `${missing.length} références pas trouvées en mail`,
         lines: missing.map((ref) => ({ ref, text: "pas trouvé en mail" })),
-        detail: inbox?.newestMail
-          ? `Dernier email visible par l'app : ${inbox.newestMail}. ` +
-            "Si l'email est plus récent, ouvrez Outlook classique, laissez-le se synchroniser, puis relancez."
-          : "",
+        detail: !inbox?.newestMail
+          ? ""
+          : stale
+            ? `⚠ Outlook classique n'est plus à jour : le dernier email qu'il voit date du ${inbox.newestMail} (${age.label}). ` +
+              "Les emails arrivés depuis sont invisibles pour l'app — ouvrez Outlook classique, vérifiez qu'il est connecté et laissez-le se synchroniser."
+            : `Dernier email visible par l'app : ${inbox.newestMail}${age?.label ? ` (${age.label})` : ""}. ` +
+              "Si l'email est plus récent, ouvrez Outlook classique, laissez-le se synchroniser, puis relancez.",
       });
     }
     if (noXlsx.length) {
