@@ -303,7 +303,12 @@ const findLtaPdfs = async (ltaRef) => {
 const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 app.post("/api/lta/outlook-email", async (req, res) => {
-  const { ltaRef, dumsCount } = req.body || {};
+  // mode "new" = the user works in the NEW Outlook (chosen in the app, per
+  // device): skip classic-Outlook COM entirely and go straight to the mailto +
+  // clipboard path, which opens the default mail app (the new Outlook, if it is
+  // the Windows default for e-mail). Otherwise COM first, as before.
+  const { ltaRef, dumsCount, mode } = req.body || {};
+  const useCom = mode !== "new";
   if (!ltaRef) {
     res.status(400).json({ ok: false, reason: "ltaRef is required" });
     return;
@@ -344,32 +349,39 @@ app.post("/api/lta/outlook-email", async (req, res) => {
     //
     //  1. Try classic Outlook via COM → opens a draft with the PDFs already
     //     attached (best UX, zero extra clicks).  METHOD=com
-    //  2. If COM is unavailable (NEW Outlook / web has no COM, or a different
-    //     elevation blocks it) → copy the PDFs to the clipboard as files AND
-    //     open the default mail app's compose via mailto:. The user clicks in
-    //     the message and presses Ctrl+V to attach.  METHOD=clipboard
+    //     Skipped when the app is set to the NEW Outlook (mode "new").
+    //  2. If COM is skipped or unavailable (NEW Outlook / web has no COM, or a
+    //     different elevation blocks it) → copy the PDFs to the clipboard as
+    //     files AND open the default mail app's compose via mailto:. The user
+    //     clicks in the message and presses Ctrl+V to attach.  METHOD=clipboard
     const script = `$ErrorActionPreference = 'Stop'
 $files = ${filesArray}
+$useCom = ${useCom ? "$true" : "$false"}
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-try {
-  $ol = New-Object -ComObject Outlook.Application
-  $mail = $ol.CreateItem(0)
-  $mail.To = ${psq(to)}
-  $mail.Subject = ${psq(subject)}
-  $mail.Body = ''
-  foreach ($f in $files) { if (Test-Path -LiteralPath $f) { [void]$mail.Attachments.Add($f) } }
-  $mail.Display($false)
-  # Bring the draft window to the foreground instead of opening it behind the app.
-  $insp = $mail.GetInspector
-  $insp.Activate()
-  Write-Output 'METHOD=com'
-} catch {
-  $comError = ($_.Exception.Message -replace "\\r?\\n"," ")
+$opened = $false
+if ($useCom) {
+  try {
+    $ol = New-Object -ComObject Outlook.Application
+    $mail = $ol.CreateItem(0)
+    $mail.To = ${psq(to)}
+    $mail.Subject = ${psq(subject)}
+    $mail.Body = ''
+    foreach ($f in $files) { if (Test-Path -LiteralPath $f) { [void]$mail.Attachments.Add($f) } }
+    $mail.Display($false)
+    # Bring the draft window to the foreground instead of opening it behind the app.
+    $insp = $mail.GetInspector
+    $insp.Activate()
+    Write-Output 'METHOD=com'
+    $opened = $true
+  } catch {
+    Write-Output ('COMERR=' + ($_.Exception.Message -replace "\\r?\\n"," "))
+  }
+}
+if (-not $opened) {
   try { Set-Clipboard -LiteralPath $files } catch {}
   $uri = 'mailto:' + ${psq(mailtoTo)} + '?subject=' + [uri]::EscapeDataString(${psq(subject)})
   Start-Process $uri
   Write-Output 'METHOD=clipboard'
-  Write-Output ('COMERR=' + $comError)
   Write-Output ('ELEVATED=' + $isAdmin)
 }
 `;
@@ -418,7 +430,7 @@ try {
         const comErr = out.match(/COMERR=(.*)/)?.[1]?.trim();
         const elevated = /ELEVATED=True/i.test(out);
         logger.info(
-          { ltaRef, count: pdfs.length, method, comErr, elevated },
+          { ltaRef, count: pdfs.length, method, mode: useCom ? "classic" : "new", comErr, elevated },
           "Mail draft opened",
         );
         res.json({
@@ -427,6 +439,7 @@ try {
           subject,
           folder,
           method,
+          mode: useCom ? "classic" : "new",
           comErr,
           elevated,
         });
@@ -616,9 +629,18 @@ try {
   if ($missing.Count -gt 0 -and -not $wasRunning -and $syncWaitSec -gt 0) {
     Write-Output ('DEBUG=Classic Outlook was not open - syncing, re-searching ' + $missing.Count + ' ref(s) for up to ' + $syncWaitSec + 's')
     try { $ns.SendAndReceive($false) } catch {}
-    $deadline = (Get-Date).AddSeconds($syncWaitSec)
+    $waitStart = Get-Date
+    $deadline = $waitStart.AddSeconds($syncWaitSec)
     while ($missing.Count -gt 0 -and (Get-Date) -lt $deadline) {
       Start-Sleep -Seconds 5
+      # Still offline/disconnected (<= 400) after 15 s: it is not going to
+      # sync (seen on the device: hidden instance stuck at 400) — stop waiting.
+      $nowMode = 0
+      try { $nowMode = [int]$acct.ExchangeConnectionMode } catch {}
+      if ($nowMode -gt 0 -and $nowMode -le 400 -and ((Get-Date) - $waitStart).TotalSeconds -ge 15) {
+        Write-Output ('DEBUG=Classic Outlook still disconnected (connectionMode=' + $nowMode + ') after 15s - not waiting longer')
+        break
+      }
       foreach ($ref in $missing) {
         Find-RefMail $inbox $ref $false
         if ($script:found -ne $null) {

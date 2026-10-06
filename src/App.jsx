@@ -73,6 +73,24 @@ function App() {
   // fileName -> "sending" | "sent" | "error"  for the Outlook button state.
   const [emailState, setEmailState] = useState({});
 
+  // Which Outlook gets the emails on THIS device (saved per device):
+  //  "classic" — classic Outlook via COM, PDFs attached automatically;
+  //  "new"     — the new Outlook can't be automated, so the email opens in the
+  //              default mail app with To/subject filled and the PDFs are put on
+  //              the clipboard for Ctrl+V.
+  const [outlookMode, setOutlookMode] = useState(() => {
+    try {
+      return localStorage.getItem("outlookMode") === "new" ? "new" : "classic";
+    } catch {
+      return "classic";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("outlookMode", outlookMode);
+    } catch {}
+  }, [outlookMode]);
+
   // Import tab: pull DUM .xlsx from the Outlook inbox by LTA ref.
   const [importRefs, setImportRefs] = useState("");
   const [importing, setImporting] = useState(false);
@@ -325,6 +343,7 @@ function App() {
         body: JSON.stringify({
           ltaRef: item.ltaRef,
           dumsCount: item.dumsCount,
+          mode: outlookMode,
         }),
       });
       const data = await r.json();
@@ -332,7 +351,15 @@ function App() {
         setEmailState((p) => ({ ...p, [item.fileName]: "sent" }));
         // Classic Outlook (COM) attaches automatically. The clipboard fallback
         // (new Outlook / web) opens compose with the PDFs on the clipboard.
-        if (!silent && data.method === "clipboard") {
+        if (!silent && data.mode === "new") {
+          // Drag-and-drop fallback in case Ctrl+V doesn't attach files.
+          if (isElectron && data.folder) window.electronAPI.openFolder(data.folder);
+          alert(
+            `Nouvel Outlook : l'email est ouvert avec les destinataires et l'objet.\n\n` +
+              `Les ${data.count} PDF sont copiés — cliquez dans le message et faites Ctrl+V.\n` +
+              `Si rien ne s'attache, glissez-les depuis le dossier qui vient de s'ouvrir.`,
+          );
+        } else if (!silent && data.method === "clipboard") {
           const diag = data.comErr
             ? `\n\n— Diagnostic —\nAuto-attach (classic Outlook COM) failed:\n${data.comErr}\nApp running as Administrator: ${data.elevated ? "YES" : "no"}`
             : "";
@@ -343,7 +370,7 @@ function App() {
               diag,
           );
         }
-        return { ok: true, method: data.method };
+        return { ok: true, method: data.method, count: data.count };
       }
       setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
       if (!silent) alert(data.reason || "Could not open the Outlook draft.");
@@ -373,31 +400,57 @@ function App() {
 
   // Bulk: open an Outlook draft for every selected LTA, one at a time (COM can't
   // be driven in parallel). One summary at the end instead of N alerts.
+  // New Outlook: the clipboard holds one LTA's PDFs at a time, so it pauses
+  // after each email until the user has pasted them and clicks OK.
   const sendAllEmails = async () => {
     const items = orderedItems.filter((it) => selected[it.fileName]);
     if (!items.length) return;
+    const isNew = outlookMode === "new";
     if (
       !window.confirm(
-        `Créer un brouillon Outlook pour ${items.length} LTA ?\n\n` +
-          `Chaque brouillon s'ouvre avec ses PDF signés joints.`,
+        isNew
+          ? `Ouvrir ${items.length} email(s) dans le nouvel Outlook, un par un ?\n\n` +
+              `Pour chacun, les PDF sont copiés : collez-les dans le message avec Ctrl+V, ` +
+              `puis revenez ici et cliquez OK pour ouvrir le suivant.\n\n` +
+              `(Si Ctrl+V n'attache rien, utilisez le bouton « Envoyer par email » de chaque LTA : ` +
+              `il ouvre aussi le dossier des PDF à glisser.)`
+          : `Créer un brouillon Outlook pour ${items.length} LTA ?\n\n` +
+              `Chaque brouillon s'ouvre avec ses PDF signés joints.`,
       )
     )
       return;
     setSendingAll(true);
     let ok = 0;
     const failed = [];
+    let stoppedAt = null;
     try {
-      for (const item of items) {
+      for (let i = 0; i < items.length; i += 1) {
+        const item = items[i];
         const res = await sendEmailRequest(item, { silent: true });
         if (res.ok) ok++;
         else failed.push(item.ltaRef);
+        if (isNew && res.ok && i < items.length - 1) {
+          const next = window.confirm(
+            `Email ${i + 1}/${items.length} ouvert : LTA ${item.ltaRef} (${res.count} PDF copiés).\n\n` +
+              `Collez les PDF avec Ctrl+V dans le message, puis cliquez OK pour ouvrir le suivant.\n` +
+              `(Annuler = arrêter ici.)`,
+          );
+          if (!next) {
+            stoppedAt = i + 1;
+            break;
+          }
+        }
       }
     } finally {
       setSendingAll(false);
       items.forEach((it) => clearEmailStateSoon(it.fileName));
     }
     alert(
-      `Brouillons créés : ${ok} / ${items.length}` +
+      (isNew ? `Emails ouverts : ${ok} / ${items.length}` : `Brouillons créés : ${ok} / ${items.length}`) +
+        (isNew && ok && stoppedAt == null
+          ? `\n\nPour le dernier email, collez ses PDF avec Ctrl+V.`
+          : "") +
+        (stoppedAt != null ? `\n\nArrêté après ${stoppedAt} email(s).` : "") +
         (failed.length ? `\n\nÉchecs (non signés ?) :\n${failed.join("\n")}` : ""),
     );
   };
@@ -766,10 +819,40 @@ function App() {
                 📁 Output
               </button>
             )}
+            <div
+              className="flex rounded-xl border border-ink/15 bg-white/70 p-0.5"
+              title={
+                "Où ouvrir les emails (« Envoyer par email » / « Envoyer tous ») sur ce PC :\n" +
+                "• Outlook classique — les PDF sont joints automatiquement\n" +
+                "• Nouvel Outlook — les PDF sont copiés, à coller avec Ctrl+V\n" +
+                "  (le nouvel Outlook doit être l'app e-mail par défaut de Windows)"
+              }
+            >
+              {[
+                ["classic", "Outlook classique"],
+                ["new", "Nouvel Outlook"],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setOutlookMode(value)}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
+                    outlookMode === value
+                      ? "bg-[#0F6CBD] text-white"
+                      : "text-steel hover:text-ink"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <button
               onClick={sendAllEmails}
               disabled={!selectedFileNames.length || running || sendingAll}
-              title="Créer un brouillon Outlook pour tous les LTA sélectionnés"
+              title={
+                outlookMode === "new"
+                  ? "Ouvrir un email dans le nouvel Outlook pour chaque LTA sélectionné (PDF à coller)"
+                  : "Créer un brouillon Outlook pour tous les LTA sélectionnés"
+              }
               className={`${btn} bg-[#0F6CBD] text-white shadow-soft hover:bg-[#0B5AA2]`}
             >
               {sendingAll

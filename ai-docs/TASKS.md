@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ "Outlook classique / Nouvel Outlook" switch for the email buttons (2026-10-06)
+
+Header switch, saved per device. **Nouvel Outlook** skips classic-Outlook COM: the email opens in the default mail app with To/subject filled and the PDFs copied for Ctrl+V; "Envoyer tous" goes one LTA at a time with an OK between each. Requires the new Outlook to be the Windows default e-mail app. Also: the Import's sync wait now stops after 15 s when classic stays disconnected. **To check on the device:** does Ctrl+V attach the PDFs in the new Outlook? (Fallback: drag from the folder that opens.) **Still open:** Import can't use the new Outlook — needs a healthy classic Outlook, or a Gmail IMAP / Microsoft Graph source. See PROGRESS.md.
+
 ### ⚠️ Import tab — classic Outlook on the device stopped syncing on 02/10 13:10 (2026-10-06, open)
 
 **Cause found:** classic Outlook's "Éléments envoyés" is at its maximum item count (classic's own dialog) — it keeps sent mail in the Outbox and has stopped taking in new mail. **To do on the device:** archive/move old Sent Items. **User asked:** can the app use the new Outlook instead? Not directly — the new Outlook has no automation interface. Options: (a) keep classic running only for the app, (b) an app setting that always uses the mailto + clipboard path (new Outlook compose, manual Ctrl+V, one LTA at a time), (c) Microsoft Graph — drafts with PDFs created server-side, appear in the new Outlook's Brouillons; Import searches the server (needs an Entra ID app registration on medafrica-log.com).

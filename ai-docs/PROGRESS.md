@@ -4,6 +4,26 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-06 — "Outlook classique / Nouvel Outlook" switch for the email buttons + shorter futile sync wait
+
+**Problem:** on the device the user works in the **new** Outlook, but "Envoyer par email" / "Envoyer tous" always opened a **classic** Outlook draft. Changing the Windows default mail app doesn't help: the endpoint drives classic Outlook directly through COM (which succeeds as long as classic is installed) and only used the default mail app (`mailto:`) as a fallback when COM failed. The new Outlook has no automation interface (no COM, no command-line attach), so it can never get a draft with the PDFs pre-attached.
+
+**Fix:**
+
+- **`src/App.jsx`** — segmented switch **Outlook classique | Nouvel Outlook** in the header next to "Envoyer tous", saved per device in `localStorage` (`outlookMode`), sent as `mode` to `/api/lta/outlook-email`. Tooltip explains both modes and that the new Outlook must be the Windows default e-mail app.
+  - Single LTA, new mode: opens the PDF folder (drag-and-drop fallback) + an alert "Les N PDF sont copiés — Ctrl+V…".
+  - **Envoyer tous**, new mode: one email at a time — the clipboard only holds one LTA's PDFs, so after each email a `confirm()` waits until the user has pasted and clicks OK (Annuler stops); the summary says how many were opened / where it stopped.
+- **`server/index.js`** — `mode: "new"` → `$useCom = $false`: COM is skipped and the script goes straight to `Set-Clipboard -LiteralPath` (PDFs as files) + `Start-Process mailto:` (default mail app). Classic mode unchanged (COM first, same fallback on COM failure). The response includes `mode`.
+- **Import sync wait:** the device's diagnostic showed a hidden COM-started classic (`windowsOpen=0`) stuck at `connectionMode=400` for the full 45 s. The wait loop now re-reads the account's connection mode and gives up after 15 s if it is still ≤ 400 (offline/disconnected).
+
+**Verified:** both email scripts parse (classic + new; not executed — it would pop a mail window and overwrite the clipboard); disconnected-wait test against this PC's Outlook with a 40 s allowance and forced mode 400 → stopped at ~15 s (17.4 s total), nothing saved; header screenshot in both states, choice persists across reload, no page errors; `vite build` OK. **Not verified:** whether the new Outlook attaches files pasted with Ctrl+V (drag from the opened folder is the fallback).
+
+**Import is unchanged in principle:** it can only read classic Outlook's copy. No setting makes it read the new Outlook.
+
+**Files changed:** `server/index.js`, `src/App.jsx`.
+
+---
+
 ## 2026-10-06 — Import tab: diagnosis confirmed on the device — classic Outlook stuck since 02/10 13:10
 
 **Data from the device (Détails du diagnostic):** `classic Outlook already open: True`, account `mohamed.tyaybi@medafrica-log.com`, `totalItems=6458`, **`newestMail=2026-10-02 13:10`** — on 06/10. Refs `607-52812966`, `235-99203156`, `607-52812970` only matched Speedaf "IMPORT PRE-ALERT" mails from 29–30/09 (`keyword=False`). The `LTA Complet - 3eme LTA - 607-52812966` mail the user sees in the **new** Outlook arrived **02/10 22:45** — after classic's cut-off, so classic's copy doesn't have it.
