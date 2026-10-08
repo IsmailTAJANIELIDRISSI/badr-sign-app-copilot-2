@@ -4,7 +4,11 @@
 
 ## Recently Completed
 
-### ⚠️ New Outlook: PDFs pasted into the draft automatically (2026-10-08, to validate on the device)
+### ⚠️ New Outlook: drafts opened as .eml with the PDFs attached (2026-10-08, to validate on the device)
+
+"Nouvel Outlook" mode now builds an `.eml` (`X-Unsent: 1` first line, Message-ID, To/subject, every PDF attached, empty HTML body) and opens it with the default `.eml` app (set to the new Outlook on the device). Real attachments — no clipboard, no keyboard; "Envoyer tous" runs straight through. Falls back to the paste method on any error; `NEW_OUTLOOK_METHOD=paste` in `.env` forces the paste method if this Outlook build opens `.eml` read-only. **Validate on the device:** the draft is editable, has its PDFs, can be saved/sent; log line `Mail draft opened … method: "eml"`. See PROGRESS.md.
+
+### ⚠️ New Outlook: PDFs pasted into the draft automatically (2026-10-08, superseded by .eml as default — kept as fallback)
 
 "Nouvel Outlook" mode: after opening the draft, the app waits for the window titled with the subject to be in front and presses Ctrl+V itself (PDFs are on the clipboard); "Envoyer tous" now runs unattended and only pauses for an email it couldn't paste into. Also fixed the `Error opening folder` log (explorer.exe exit code) with `shell.openPath`. **Validate on the device:** full relaunch (Electron main changed), then check the draft has its PDFs and the log shows `pasted: "sent"`. If the new Outlook ignores pasted files, the only route to real automatic attachments is Microsoft Graph (needs an Entra ID app registration). See PROGRESS.md.
 

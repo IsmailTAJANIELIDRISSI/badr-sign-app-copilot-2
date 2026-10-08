@@ -4,6 +4,26 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-08 — New Outlook: drafts opened as .eml with the PDFs really attached (paste kept as fallback)
+
+**Why:** the auto-paste (entry below) depends on the draft window being in front at the right moment and on the new Outlook accepting pasted files. The user found a better route: an `.eml` file whose first line is `X-Unsent: 1` opens in Outlook as an **editable draft**, attachments included. Reported flaky in some new-Outlook builds (2024: opened read-only; late 2025: couldn't save as draft without a `Message-ID`, fixed later) — hence the explicit Message-ID and the fallback.
+
+**Change (`server/index.js`):**
+- `NEW_OUTLOOK_METHOD` (env, default `eml`; `paste` = previous behaviour), exposed in `/api/config` as `newOutlookMethod`.
+- `writeDraftEml({ to, subject, pdfs })` builds the message with nodemailer's **`streamTransport` (`buffer: true`, `newline: "windows"`) — builds, sends nothing** — To = `config.outlookTo`, the usual subject, every PDF attached, `messageId <uuid@badr-sign.local>`, then prepends `X-Unsent: 1\r\n` and writes `<tmp>/badr-drafts/<subject> <timestamp>.eml` (files > 2 days old are cleaned up). **Gotcha found while testing:** with an empty `text` body nodemailer makes a 1-PDF email *be* the PDF (no body part, not an editable draft) — so it uses `html: "<p></p>"` to always get `multipart/mixed` [html body + PDFs].
+- `openWithDefaultApp(file)` → `Start-Process -LiteralPath` (ShellExecute → the Windows default app for `.eml`).
+- In the endpoint, `mode: "new"` + `eml` → write + open → `{ method: "eml" }`. Any error → logged and falls through to the mailto + paste script.
+
+**Frontend (`src/App.jsx`):** `method: "eml"` → green toast "Brouillon ouvert — N PDF joints — vérifiez avant d'envoyer". `sendEmailRequest` returns `attached` (true for `com`, `eml`, or a successful paste); **Envoyer tous** only pauses for a draft with `!attached`, and its confirm text no longer tells the user to keep hands off the keyboard unless the paste method is configured. Summary: "Avec leurs PDF joints automatiquement : x / n".
+
+**Verified:** `writeDraftEml` extracted verbatim from `server/index.js` and run on dummy PDFs (1 and 3): first line `X-Unsent: 1`, Message-ID present, both recipients, `multipart/mixed` with an HTML body part, the right number of PDF attachments, CRLF line endings. `node --check` + `vite build` OK. A standalone test file `outputs/TEST-brouillon-nouvel-outlook.eml` (gitignored; 2 dummy PDFs, To = the user's own Gmail) was generated for a double-click check. **Not verified:** how the device's new-Outlook build opens it — editable draft? attachments? "Enregistrer" works? signature present?
+
+**Device prerequisite (done by the user):** `.eml` → Outlook (new) in Windows default apps.
+
+**Files changed:** `server/index.js`, `src/App.jsx`, `.env.example`.
+
+---
+
 ## 2026-10-08 — New Outlook: the app pastes the PDFs into the draft itself + "open folder" error fixed
 
 **Context:** on the device the new Outlook is now the Windows default mail app, so the "Nouvel Outlook" mode opens the draft there (To + subject filled). The user wants the PDFs attached automatically instead of pressing Ctrl+V.

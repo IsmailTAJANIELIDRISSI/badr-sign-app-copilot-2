@@ -98,6 +98,9 @@ function App() {
   const [importDebug, setImportDebug] = useState([]);
   const [cleaning, setCleaning] = useState(false);
   const [sendingAll, setSendingAll] = useState(false);
+  // How the server opens "Nouvel Outlook" drafts on this machine: "eml" (PDFs
+  // already attached) or "paste" (the app presses Ctrl+V). From /api/config.
+  const [newOutlookMethod, setNewOutlookMethod] = useState("eml");
 
   // Extract only LTA-ref-shaped tokens (e.g. 235-96330754) from any text — so a
   // whole WhatsApp message ("Bonsoir, Veuillez valider sans blocage: …") can be
@@ -367,7 +370,14 @@ function App() {
         setEmailState((p) => ({ ...p, [item.fileName]: "sent" }));
         // Classic Outlook (COM) attaches automatically. The clipboard fallback
         // (new Outlook / web) opens compose with the PDFs on the clipboard.
-        if (!silent && data.mode === "new" && data.pasted === "sent") {
+        if (!silent && data.method === "eml") {
+          // .eml draft: the PDFs are real attachments of the email file.
+          pushToast({
+            tone: "success",
+            title: `Brouillon ouvert — ${data.count} PDF joints`,
+            detail: `LTA ${item.ltaRef} : vérifiez le brouillon dans le nouvel Outlook avant d'envoyer.`,
+          });
+        } else if (!silent && data.mode === "new" && data.pasted === "sent") {
           // The server pressed Ctrl+V in the draft itself (new Outlook can't be
           // handed attachments any other way) — just remind to check.
           pushToast({
@@ -397,7 +407,14 @@ function App() {
               diag,
           );
         }
-        return { ok: true, method: data.method, count: data.count, pasted: data.pasted };
+        return {
+          ok: true,
+          method: data.method,
+          count: data.count,
+          pasted: data.pasted,
+          // PDFs are in the draft without the user doing anything.
+          attached: data.method === "com" || data.method === "eml" || data.pasted === "sent",
+        };
       }
       setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
       if (!silent) alert(data.reason || "Could not open the Outlook draft.");
@@ -427,28 +444,33 @@ function App() {
 
   // Bulk: open an Outlook draft for every selected LTA, one at a time (COM can't
   // be driven in parallel). One summary at the end instead of N alerts.
-  // New Outlook: the server pastes each LTA's PDFs into its draft itself, so it
-  // runs on its own; only when that paste didn't happen does it pause (the
-  // clipboard holds one LTA's PDFs at a time) until the user pastes and clicks OK.
+  // New Outlook: with the .eml method every draft already carries its PDFs; with
+  // the paste method the server pastes them itself. Either way it runs on its
+  // own, and only pauses for a draft whose PDFs aren't in it (the clipboard holds
+  // one LTA's PDFs at a time) until the user pastes and clicks OK.
   const sendAllEmails = async () => {
     const items = orderedItems.filter((it) => selected[it.fileName]);
     if (!items.length) return;
     const isNew = outlookMode === "new";
+    const willPaste = isNew && newOutlookMethod === "paste";
     if (
       !window.confirm(
-        isNew
+        willPaste
           ? `Ouvrir ${items.length} email(s) dans le nouvel Outlook ?\n\n` +
               `L'app ouvre chaque email et y colle ses PDF automatiquement (≈ 5 s par email). ` +
               `Ne touchez ni au clavier ni à la souris pendant l'opération.\n\n` +
               `Vérifiez ensuite les pièces jointes de chaque email avant d'envoyer.`
-          : `Créer un brouillon Outlook pour ${items.length} LTA ?\n\n` +
-              `Chaque brouillon s'ouvre avec ses PDF signés joints.`,
+          : isNew
+            ? `Ouvrir ${items.length} brouillon(s) dans le nouvel Outlook ?\n\n` +
+                `Chaque brouillon s'ouvre avec ses PDF signés joints. Vérifiez-les avant d'envoyer.`
+            : `Créer un brouillon Outlook pour ${items.length} LTA ?\n\n` +
+                `Chaque brouillon s'ouvre avec ses PDF signés joints.`,
       )
     )
       return;
     setSendingAll(true);
     let ok = 0;
-    let autoPasted = 0;
+    let attached = 0;
     const failed = [];
     let stoppedAt = null;
     try {
@@ -457,8 +479,8 @@ function App() {
         const res = await sendEmailRequest(item, { silent: true });
         if (res.ok) ok++;
         else failed.push(item.ltaRef);
-        if (res.pasted === "sent") autoPasted++;
-        if (isNew && res.ok && res.pasted !== "sent" && i < items.length - 1) {
+        if (res.attached) attached++;
+        if (isNew && res.ok && !res.attached && i < items.length - 1) {
           const next = window.confirm(
             `Email ${i + 1}/${items.length} ouvert : LTA ${item.ltaRef} (${res.count} PDF copiés), ` +
               `mais l'app n'a pas pu les coller elle-même.\n\n` +
@@ -476,11 +498,11 @@ function App() {
       items.forEach((it) => clearEmailStateSoon(it.fileName));
     }
     const lastNotPasted =
-      isNew && ok && stoppedAt == null && autoPasted < ok;
+      isNew && ok && stoppedAt == null && attached < ok;
     alert(
       (isNew ? `Emails ouverts : ${ok} / ${items.length}` : `Brouillons créés : ${ok} / ${items.length}`) +
         (isNew && ok
-          ? `\nPDF collés automatiquement : ${autoPasted} / ${ok} — vérifiez les pièces jointes avant d'envoyer.`
+          ? `\nAvec leurs PDF joints automatiquement : ${attached} / ${ok} — vérifiez les pièces jointes avant d'envoyer.`
           : "") +
         (lastNotPasted
           ? `\n\nSi le dernier email n'a pas ses PDF, collez-les avec Ctrl+V.`
@@ -508,6 +530,7 @@ function App() {
         const configData = await configRes.json();
         setDumsFolder(configData.dumsFolder);
         setOutputsFolder(configData.outputsFolder);
+        if (configData.newOutlookMethod) setNewOutlookMethod(configData.newOutlookMethod);
         setApiReady(true);
       }
 

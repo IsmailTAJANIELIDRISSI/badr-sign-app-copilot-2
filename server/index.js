@@ -57,6 +57,7 @@ app.get("/api/config", (_req, res) => {
     dumsFolder: config.directories.dums,
     outputsFolder: config.directories.outputs,
     isElectron: config.isElectron,
+    newOutlookMethod: NEW_OUTLOOK_METHOD,
   });
 });
 
@@ -309,6 +310,75 @@ const MAILTO_PASTE_WAIT_SEC = Math.max(
   Number.parseInt(process.env.MAILTO_PASTE_WAIT_SEC || "20", 10) || 0,
 );
 
+// How "Nouvel Outlook" mode opens a draft:
+//  "eml"   — build the whole email (To, subject, PDFs attached) as an .eml with
+//            "X-Unsent: 1" and open it; the new Outlook shows it as an editable
+//            draft. Real attachments, no clipboard/keyboard. Needs the new
+//            Outlook as the Windows default app for .eml.
+//  "paste" — mailto: compose + the app presses Ctrl+V with the PDFs on the
+//            clipboard. Fallback if this Outlook build opens .eml read-only.
+// Per machine via NEW_OUTLOOK_METHOD in .env; an .eml failure falls back to paste.
+const NEW_OUTLOOK_METHOD =
+  String(process.env.NEW_OUTLOOK_METHOD || "eml").toLowerCase() === "paste"
+    ? "paste"
+    : "eml";
+
+/**
+ * Write an unsent-draft .eml (To, subject, empty HTML body, every PDF attached)
+ * into <tmp>/badr-drafts and return its path. Built with nodemailer's
+ * streamTransport (builds the message, sends nothing).
+ */
+const writeDraftEml = async ({ to, subject, pdfs }) => {
+  const nodemailer = (await import("nodemailer")).default;
+  const transport = nodemailer.createTransport({
+    streamTransport: true,
+    buffer: true,
+    newline: "windows",
+  });
+  const { message } = await transport.sendMail({
+    to,
+    subject,
+    // A real (empty) body part: without one, a single-PDF email is built with
+    // the PDF as the whole message, which is not an editable draft.
+    html: "<p></p>",
+    // Some new-Outlook builds can't save an .eml draft that has no Message-ID.
+    messageId: `<${uuidv4()}@badr-sign.local>`,
+    attachments: pdfs.map((p) => ({
+      filename: path.basename(p),
+      path: p,
+      contentType: "application/pdf",
+    })),
+  });
+
+  const os = await import("os");
+  const dir = path.join(os.tmpdir(), "badr-drafts");
+  await fs.ensureDir(dir);
+  // Housekeeping: drafts older than 2 days were opened long ago.
+  for (const name of await fs.readdir(dir).catch(() => [])) {
+    const p = path.join(dir, name);
+    const st = await fs.stat(p).catch(() => null);
+    if (st && Date.now() - st.mtimeMs > 2 * 24 * 3600 * 1000) await fs.remove(p).catch(() => {});
+  }
+  const safe = subject.replace(/[\\/:*?"<>|]/g, "_");
+  const file = path.join(dir, `${safe} ${Date.now()}.eml`);
+  // "X-Unsent: 1" must be the very first line for Outlook to open it as a draft.
+  await fs.writeFile(file, Buffer.concat([Buffer.from("X-Unsent: 1\r\n"), message]));
+  return file;
+};
+
+/** Open a file with its Windows default app (ShellExecute), e.g. .eml → Outlook. */
+const openWithDefaultApp = async (file) => {
+  const { execFile } = await import("child_process");
+  await new Promise((resolve, reject) =>
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", `Start-Process -LiteralPath ${psq(file)}`],
+      { timeout: 20000, windowsHide: true },
+      (err, _stdout, stderr) => (err ? reject(new Error(stderr || err.message)) : resolve()),
+    ),
+  );
+};
+
 app.post("/api/lta/outlook-email", async (req, res) => {
   // mode "new" = the user works in the NEW Outlook (chosen in the app, per
   // device): skip classic-Outlook COM entirely and go straight to the mailto +
@@ -347,6 +417,26 @@ app.post("/api/lta/outlook-email", async (req, res) => {
       .join(";");
     const subject = `MAWB ${ltaRef} - (${dumsCount ?? pdfs.length} DUM)`;
     const filesArray = `@(${pdfs.map(psq).join(",")})`;
+
+    // New Outlook, ".eml" method: the draft is opened with the PDFs already
+    // attached. Any failure here falls through to the mailto + paste script.
+    if (!useCom && NEW_OUTLOOK_METHOD === "eml") {
+      try {
+        const emlPath = await writeDraftEml({ to: config.outlookTo, subject, pdfs });
+        await openWithDefaultApp(emlPath);
+        logger.info(
+          { ltaRef, count: pdfs.length, method: "eml", mode: "new", emlPath },
+          "Mail draft opened",
+        );
+        res.json({ ok: true, count: pdfs.length, subject, folder, method: "eml", mode: "new" });
+        return;
+      } catch (e) {
+        logger.warn(
+          { ltaRef, error: e.message },
+          "eml draft failed — falling back to mailto + paste",
+        );
+      }
+    }
 
     // Universal open-in-mail script. Written as UTF-16LE with a BOM (see below)
     // so the "°" in "LTA N° …" paths and accented names survive the Node → temp
