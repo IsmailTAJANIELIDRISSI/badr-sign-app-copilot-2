@@ -101,6 +101,10 @@ function App() {
   // How the server opens "Nouvel Outlook" drafts on this machine: "eml" (PDFs
   // already attached) or "paste" (the app presses Ctrl+V). From /api/config.
   const [newOutlookMethod, setNewOutlookMethod] = useState("eml");
+  // Where the Import tab reads the "LTA Complet" emails from on this machine:
+  // "gmail" (the account that sends them) or "outlook" (classic, via COM).
+  const [importSource, setImportSource] = useState("outlook");
+  const [importAccount, setImportAccount] = useState("");
 
   // Extract only LTA-ref-shaped tokens (e.g. 235-96330754) from any text — so a
   // whole WhatsApp message ("Bonsoir, Veuillez valider sans blocage: …") can be
@@ -140,46 +144,61 @@ function App() {
     return { hours, label };
   };
 
-  // Most likely reason classic Outlook's mailbox copy is stale, from the state
-  // the import script reports (OlExchangeConnectionMode, offline flag, local
-  // data file size, windows). Order matters: a connected Outlook (>= 500) with
-  // no window is NOT a sign-in problem — seen on the device (700, no window,
-  // still stuck), where classic's own dialog said "Éléments envoyés" was full.
-  const outlookStaleCause = (inbox) => {
+  // Every reason found for classic Outlook's mailbox copy being stale, from the
+  // state the import script reports (OlExchangeConnectionMode, offline flag,
+  // local data file size, Sent Items / Outbox counts, windows). ALL of them are
+  // listed, not just the first: on the device it was disconnected (400) AND its
+  // data file was 47.7 of 50 GB AND 29 mails sat in the Outbox, and naming only
+  // the connection hid the one that actually needed fixing. A connected Outlook
+  // (>= 500) with no window is NOT a sign-in problem (seen: 700, no window).
+  const outlookStaleCauses = (inbox) => {
     const mode = inbox?.connectionMode;
-    const outbox =
-      inbox?.outboxItems > 0
-        ? ` ${inbox.outboxItems} email(s) sont aussi bloqués dans sa Boîte d'envoi.`
-        : "";
+    const causes = [];
     if (inbox?.workOffline)
-      return "Outlook classique est en mode « Travailler hors connexion » (onglet Envoi/Réception).";
-    if (mode === 100 || mode === 200)
-      return "Outlook classique est hors connexion.";
-    if (mode === 300 || mode === 400)
-      return "Outlook classique est déconnecté du serveur (il attend sans doute une reconnexion / un mot de passe).";
-    if (inbox?.dataFileGb != null && inbox.dataFileGb >= 0.95 * inbox.dataFileLimitGb)
-      return (
-        `Le fichier de données d'Outlook classique est plein (${inbox.dataFileGb} Go sur ${inbox.dataFileLimitGb} Go) : ` +
-        "il ne peut plus rien recevoir. Il faut libérer de la place ou recréer ce fichier." +
-        outbox
+      causes.push("Outlook classique est en mode « Travailler hors connexion » (onglet Envoi/Réception).");
+    else if (mode === 100 || mode === 200)
+      causes.push("Outlook classique est hors connexion.");
+    else if (mode === 300 || mode === 400)
+      causes.push("Outlook classique n'est pas connecté au serveur (il attend une reconnexion ou un mot de passe).");
+
+    if (inbox?.dataFileGb != null && inbox.dataFileLimitGb) {
+      const used = inbox.dataFileGb / inbox.dataFileLimitGb;
+      if (used >= 0.9)
+        causes.push(
+          `Son fichier de données est ${used >= 0.99 ? "plein" : "presque plein"} : ${inbox.dataFileGb} Go sur ${inbox.dataFileLimitGb} Go` +
+            (inbox.sentItems > 500
+              ? ` (« Éléments envoyés » contient ${inbox.sentItems} éléments, avec les PDF des LTA)`
+              : "") +
+            ". Plein, il ne peut plus recevoir de nouveaux emails.",
+        );
+    }
+    if (inbox?.outboxItems > 0)
+      causes.push(
+        `${inbox.outboxItems} email(s) sont bloqués dans sa Boîte d'envoi — à vérifier avant tout nettoyage.`,
       );
-    if (mode >= 500)
-      return (
+    if (!causes.length && mode >= 500)
+      causes.push(
         "Outlook classique est connecté mais n'enregistre plus les nouveaux emails — ouvrez-le : il affiche la raison " +
-        "(ex. « Éléments envoyés contient le nombre maximal d'éléments » → archivez/déplacez des éléments envoyés)." +
-        outbox
+          "(ex. « Éléments envoyés contient le nombre maximal d'éléments »).",
       );
-    if (inbox?.windowsOpen === 0)
-      return `Outlook classique tourne en arrière-plan sans fenêtre${inbox.processStarted ? ` depuis le ${inbox.processStarted}` : ""} — il ne peut pas afficher de demande de connexion. Fermez-le (Gestionnaire des tâches → OUTLOOK.EXE) puis ouvrez Outlook classique normalement.`;
-    return "Outlook classique ne se met plus à jour — ouvrez-le : il affiche la raison." + outbox;
+    if (!causes.length && inbox?.windowsOpen === 0)
+      causes.push(
+        `Outlook classique tourne en arrière-plan sans fenêtre${inbox.processStarted ? ` depuis le ${inbox.processStarted}` : ""} — ` +
+          "il ne peut pas afficher de demande de connexion. Fermez-le (Gestionnaire des tâches → OUTLOOK.EXE) puis ouvrez Outlook classique normalement.",
+      );
+    if (!causes.length)
+      causes.push("Outlook classique ne se met plus à jour — ouvrez-le : il affiche la raison.");
+    return causes;
   };
 
   // One toast per outcome, so 1 or 20 missing refs never flood the screen.
-  // `inbox.newestMail` = newest mail in the mailbox copy the app searched
-  // (classic Outlook's). On a busy inbox, nothing new for >12 h means classic
-  // Outlook has stopped syncing (seen when the user moved to the new Outlook:
-  // classic stuck 4 days behind) — say so plainly instead of just a date.
-  const notifyImportResults = (results, inbox) => {
+  // `meta.source` = where the app searched. For "outlook", `inbox.newestMail` =
+  // newest mail in the mailbox copy it searched (classic Outlook's): on a busy
+  // inbox, nothing new for >12 h means classic Outlook has stopped syncing (seen
+  // when the user moved to the new Outlook: classic stuck 4+ days behind) — say
+  // so plainly instead of just a date. For "gmail" the search is live, so a
+  // missing ref really means no such email in that account.
+  const notifyImportResults = (results, inbox, meta = {}) => {
     const refsOf = (status) =>
       results.filter((r) => importStatusOf(r) === status).map((r) => r.ref);
     const missing = refsOf("not_found");
@@ -188,6 +207,7 @@ function App() {
     if (missing.length) {
       const age = inbox?.newestMail ? formatInboxAge(inbox.newestMail) : null;
       const stale = age?.hours != null && age.hours > 12;
+      const fromGmail = meta.source === "gmail";
       pushToast({
         tone: "error",
         title:
@@ -195,12 +215,20 @@ function App() {
             ? "Référence pas trouvée en mail"
             : `${missing.length} références pas trouvées en mail`,
         lines: missing.map((ref) => ({ ref, text: "pas trouvé en mail" })),
-        detail: !inbox?.newestMail
-          ? ""
-          : stale
+        detail: fromGmail
+          ? `Cherché dans Gmail${meta.account ? ` (${meta.account})` : ""} : aucun email « LTA Complet » avec un fichier .xlsx pour ` +
+            (missing.length === 1 ? "cette référence" : "ces références") +
+            ". Vérifiez la référence, ou que l'email a bien été envoyé depuis ce compte."
+          : !inbox?.newestMail
+            ? meta.gmailNote
+              ? `Gmail non utilisé : ${meta.gmailNote}`
+              : ""
+            : stale
             ? `⚠ Outlook classique n'est plus à jour : le dernier email qu'il voit date du ${inbox.newestMail} (${age.label}). ` +
-              "Les emails arrivés depuis sont invisibles pour l'app. " +
-              `Cause probable : ${outlookStaleCause(inbox)}`
+              "Les emails arrivés depuis sont invisibles pour l'app.\n" +
+              outlookStaleCauses(inbox)
+                .map((c) => `• ${c}`)
+                .join("\n")
             : `Dernier email visible par l'app : ${inbox.newestMail}${age?.label ? ` (${age.label})` : ""}. ` +
               "Si l'email est plus récent, ouvrez Outlook classique, laissez-le se synchroniser, puis relancez.",
       });
@@ -248,7 +276,11 @@ function App() {
       if (r.ok && data.ok) {
         const results = data.results || [];
         setImportResults(results);
-        notifyImportResults(results, data.inbox);
+        notifyImportResults(results, data.inbox, {
+          source: data.source,
+          account: data.account,
+          gmailNote: data.gmailNote,
+        });
         if (data.savedCount > 0) refresh(); // new files → reload the LTA list
       } else {
         failImport(data.reason || "Échec.");
@@ -531,6 +563,8 @@ function App() {
         setDumsFolder(configData.dumsFolder);
         setOutputsFolder(configData.outputsFolder);
         if (configData.newOutlookMethod) setNewOutlookMethod(configData.newOutlookMethod);
+        if (configData.importSource) setImportSource(configData.importSource);
+        setImportAccount(configData.importAccount || "");
         setApiReady(true);
       }
 
@@ -810,7 +844,7 @@ function App() {
                     </ul>
                   )}
                   {t.detail && (
-                    <p className="mt-1 break-words text-xs text-steel">
+                    <p className="mt-1 whitespace-pre-line break-words text-xs text-steel">
                       {t.detail}
                     </p>
                   )}
@@ -1349,15 +1383,33 @@ function App() {
           <div className="h-full overflow-auto">
             <div className="mx-auto max-w-[900px] px-5 py-6">
               <h2 className="font-display text-lg font-semibold text-ink">
-                Importer les DUMs depuis Outlook
+                {importSource === "gmail"
+                  ? "Importer les DUMs depuis Gmail"
+                  : "Importer les DUMs depuis Outlook"}
               </h2>
               <p className="mt-1 text-sm text-steel">
                 Collez le message WhatsApp complet — l'app en extrait
                 automatiquement les références (format{" "}
                 <span className="font-mono text-ink">235-96330754</span>) et
-                ignore le reste du texte. Elle cherche ensuite dans la boîte de
-                réception Outlook du compte{" "}
-                <span className="font-semibold text-ink">medafrica-log.com</span>{" "}
+                ignore le reste du texte.{" "}
+                {importSource === "gmail" ? (
+                  <>
+                    Elle cherche ensuite dans le compte Gmail qui envoie ces
+                    emails
+                    {importAccount && (
+                      <>
+                        {" "}
+                        (<span className="font-semibold text-ink">{importAccount}</span>)
+                      </>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    Elle cherche ensuite dans la boîte de réception Outlook du
+                    compte{" "}
+                    <span className="font-semibold text-ink">medafrica-log.com</span>
+                  </>
+                )}{" "}
                 l'email dont l'objet contient la référence et{" "}
                 <span className="font-semibold text-ink">« LTA Complet »</span>,
                 puis enregistre le fichier{" "}

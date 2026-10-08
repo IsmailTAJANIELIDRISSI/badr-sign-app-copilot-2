@@ -9,6 +9,11 @@ import { parseLtaExcel } from "./excelParser.js";
 import { createJob, pushJobLog, state } from "./state.js";
 import { runSigningJob } from "./automation.js";
 import { sendWhatsApp, notifyLtaFailure } from "./notifications.js";
+import {
+  fetchXlsxFromGmail,
+  isGmailConfigured,
+  GmailImportError,
+} from "./gmailImport.js";
 
 await fs.ensureDir(config.directories.dums);
 await fs.ensureDir(config.directories.outputs);
@@ -52,12 +57,33 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+// Where the Import tab reads the "LTA Complet" emails from (IMPORT_SOURCE in .env):
+//  "gmail"   — IMAP on the Gmail account that sends them. Works whatever Outlook
+//              (classic/new) the PC uses, and doesn't depend on a local mailbox copy.
+//  "outlook" — classic Outlook through COM (the original method).
+//  "auto"    — default: Gmail when its credentials are in .env, and Outlook as a
+//              fallback only if Gmail can't be used (no package, bad login, no
+//              network) — never just because an email wasn't found.
+const IMPORT_SOURCE_SETTING = ["gmail", "outlook"].includes(
+  String(process.env.IMPORT_SOURCE || "").toLowerCase(),
+)
+  ? String(process.env.IMPORT_SOURCE).toLowerCase()
+  : "auto";
+const importSource = () =>
+  IMPORT_SOURCE_SETTING === "outlook"
+    ? "outlook"
+    : IMPORT_SOURCE_SETTING === "gmail" || isGmailConfigured()
+      ? "gmail"
+      : "outlook";
+
 app.get("/api/config", (_req, res) => {
   res.json({
     dumsFolder: config.directories.dums,
     outputsFolder: config.directories.outputs,
     isElectron: config.isElectron,
     newOutlookMethod: NEW_OUTLOOK_METHOD,
+    importSource: importSource(),
+    importAccount: config.imap.user,
   });
 });
 
@@ -648,6 +674,36 @@ app.post("/api/lta/fetch-xlsx", async (req, res) => {
     const dest = path.resolve(config.directories.dums);
     await fs.ensureDir(dest);
 
+    // Gmail first (see importSource). Falls through to Outlook COM below only
+    // when Gmail can't be used and the setting allows it ("auto").
+    let gmailNote = "";
+    if (importSource() === "gmail") {
+      try {
+        const g = await fetchXlsxFromGmail({ refs, dest, keyword: SUBJECT_KEYWORD });
+        g.debug.forEach((l) => logger.info(`[fetch-xlsx] ${l}`));
+        const savedCount = g.results.filter((r) => r.status === "saved").length;
+        logger.info({ count: refs.length, savedCount, source: "gmail" }, "fetch-xlsx done");
+        res.json({
+          ok: true,
+          dest,
+          savedCount,
+          results: g.results,
+          debug: g.debug,
+          source: "gmail",
+          account: g.account,
+        });
+        return;
+      } catch (e) {
+        gmailNote =
+          e instanceof GmailImportError ? e.message : `Erreur Gmail inattendue : ${e.message}`;
+        logger.warn({ code: e.code, reason: gmailNote }, "Gmail import unavailable");
+        if (IMPORT_SOURCE_SETTING === "gmail") {
+          res.status(500).json({ ok: false, reason: gmailNote, debug: [gmailNote] });
+          return;
+        }
+      }
+    }
+
     const refsArray = `@(${refs.map(psq).join(",")})`;
     // PR_SENDER_SMTP_ADDRESS — the reliable SMTP of the sender (gmail), even
     // when Outlook stores an Exchange DN in SenderEmailAddress. [char]34/39 are
@@ -887,6 +943,7 @@ try {
         // path is visible (account list, inbox reached, per-ref match counts,
         // candidate senders). Also returned to the UI for an inline detail view.
         const debug = [];
+        if (gmailNote) debug.push(`Gmail non utilisé : ${gmailNote} — recherche via Outlook`);
         for (const line of out.split(/\r?\n/)) {
           const dm = line.match(/^DEBUG=(.*)$/);
           if (dm) {
@@ -901,6 +958,7 @@ try {
           res.status(500).json({
             ok: false,
             reason:
+              (gmailNote ? `Gmail non utilisé : ${gmailNote} ` : "") +
               "Impossible de lire la boîte Outlook (Outlook classique requis). " +
               String(reason).slice(0, 300),
             debug,
@@ -945,7 +1003,7 @@ try {
           inbox.outboxItems = num(df[4]);
         }
         logger.info({ count: refs.length, savedCount, inbox }, "fetch-xlsx done");
-        res.json({ ok: true, dest, savedCount, results, debug, inbox });
+        res.json({ ok: true, dest, savedCount, results, debug, inbox, source: "outlook", gmailNote });
       },
     );
   } catch (error) {

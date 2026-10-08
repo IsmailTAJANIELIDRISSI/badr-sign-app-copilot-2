@@ -4,6 +4,53 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-08 — Import tab: reads the "LTA Complet" emails from GMAIL over IMAP (Outlook only as fallback)
+
+**Why:** the import depended on classic Outlook's local mailbox copy, which on the device is stuck (data file 47.7 / 50 GB, stopped 02/10 13:10) and can't be relied on for a user who lives in the new Outlook. The user confirmed the "LTA Complet" mails are also in the sending Gmail account (`tajanielidrissi.ismail@gmail.com`), so the app now reads them there — live, no local copy, same result whichever Outlook the PC uses.
+
+**New `server/gmailImport.js`** (`imapflow`, **lazy-imported** like nodemailer so a PC that hasn't run `npm install` can't crash the server; pinned `^1.7.8` = Node 16+, because 2.x needs Node 20 and the device's Node version is unknown):
+- connects to `imap.gmail.com:993` with `EMAIL_USER`/`EMAIL_PASS` (override `IMAP_USER`/`IMAP_PASS`/`IMAP_HOST`/`IMAP_PORT`; independent of `EMAIL_ENABLED`; a "abcd efgh ijkl mnop"-style app password has its cosmetic spaces stripped);
+- opens **All Mail found by its `\All` special-use flag** (so it works in any account language; falls back to `\Sent`, then INBOX), read-only;
+- per ref: `SEARCH SUBJECT <ref>` → fetch envelope + bodyStructure of up to 30 newest hits → keep subject contains the ref **and** `complet` (`INBOX_SUBJECT_KEYWORD`) **and** an `.xlsx` part named with the ref → most recent wins (an "Updated" resend beats the original). Speedaf "IMPORT PRE-ALERT" mails are ignored (no keyword). `no_xlsx` when a matching email exists without such an attachment;
+- downloads the part (`client.download`, decoded), writes `generated_excel - <ref>.xlsx` into the dums folder (name sanitised) and verifies it starts with `PK` (zip) so an undecoded body can't be saved as an xlsx;
+- throws `GmailImportError` with a `code` (`NO_CREDENTIALS` / `NO_PACKAGE` / `AUTH` / `NETWORK`) when the account itself can't be used.
+
+**Route (`server/index.js`):** `IMPORT_SOURCE` env — `auto` (default) = Gmail when credentials exist, **Outlook COM only as a fallback when Gmail can't be used** (never just because a ref wasn't found); `gmail` = Gmail only (clear error, no fallback); `outlook` = previous behaviour. Response adds `source` (`gmail`/`outlook`), `account`, and `gmailNote` (why Gmail was skipped). `/api/config` adds `importSource` + `importAccount`.
+
+**Frontend (`src/App.jsx`):** the tab title/description say Gmail + the account when that's the source; the red "pas trouvé en mail" toast says `Cherché dans Gmail (<account>) : aucun email « LTA Complet » avec un fichier .xlsx pour cette référence…` (a Gmail miss is real — no stale-copy logic), and shows `Gmail non utilisé : <reason>` if it fell back to Outlook and Outlook found nothing.
+
+**Verified (no real Gmail, no real mail read):** a local fake IMAP server laid out like Gmail (`[Gmail]/Tous les messages` with `\All`): found the right email among a Speedaf pre-alert, a no-xlsx mail and a newer resend; the saved file is byte-identical to the original and parses as a real xlsx; not-found ref → `not_found`; `no_xlsx` case; wrong password → `AUTH`, nothing listening → `NETWORK`, no creds → `NO_CREDENTIALS`. The **real server over HTTP**: Gmail hit + miss (`source=gmail`, file saved, **no Outlook fallback on a miss**), `auto` + wrong password → falls back to Outlook with `gmailNote`, `IMPORT_SOURCE=gmail` + wrong password → HTTP 500 + clear reason, no credentials → `importSource: outlook`. UI screenshot/text checked; `vite build` OK; dums folder untouched. **Real Gmail test (read-only, with the user's rotated app password, files to a temp folder then deleted):** login OK, `[Gmail]/Tous les messages` found via `\All`, `SEARCH SUBJECT` on the hyphenated refs works (4/2/4 hits), the 3 test refs (`235-98029853`, `065-45991864`, `235-98102233`) all **saved** as valid xlsx (zip header, parsed, sheet `Summary` 122–143 rows, 7.6–8.3 KB — matches the "8 Ko" seen in Outlook), the app's own `MAWB … (n DUM)` sends and the unrelated "2éme acheminement" mails are correctly ignored. ~3 s for 3 refs.
+
+**Two real-world findings, both fixed in `server/gmailImport.js`:**
+1. **Malformed attachment header.** The generator of the "LTA Complet" emails writes `Content-Disposition: attachment; filename= generated_excel - 065-45991864.xlsx` (unquoted, spaces) with `Content-Type: application/octet-stream`. Outlook tolerates it; **Gmail's BODYSTRUCTURE parser drops it, so the parts arrive nameless** and the first real run answered `no_xlsx` for all three refs. Fix: for plausible mails (ref + keyword in the subject) whose non-text parts have no name, fetch each part's MIME header (`bodyParts: ["N.mime"]`) and read the name leniently — `filenameFromMimeHeader` handles unquoted/quoted values, folded lines, `filename*=utf-8''…` (RFC 2231), RFC 2047 encoded words, and falls back to the Content-Type `name`.
+2. **"[ERREUR DUM]" emails.** For `235-98029853` Gmail holds two `[ERREUR DUM] LTA Complet - 14eme LTA …` mails (05/10 16:44, 18:04) and then the clean one (18:44). `pickCandidate` now prefers a mail **not** flagged `[ERREUR…]` even when older (importing a faulty Excel = signing wrong DUMs), newest among equals; if only flagged mails exist the file is still imported but the result carries `⚠ seul un email « [ERREUR DUM] … » existe : vérifiez le fichier avant de signer`. _Decision worth confirming with the team: is an `[ERREUR DUM]` Excel ever the right one to sign?_
+
+**Regression tests (fake IMAP):** header parsing (9 forms), malformed-header mails, error-vs-clean ordering both ways, error-only → warning, well-formed headers; earlier suites re-run green.
+
+**Device rollout:** commit + push, then on the device run **`npm install` once** in the app folder (auto-pull doesn't run it; `package.json` gained `imapflow`), then fully relaunch. Without it the app falls back to Outlook and says so (`Gmail non utilisé : Le paquet « imapflow » n'est pas installé…`). The device's `.env` needs `EMAIL_USER` + `EMAIL_PASS` (Gmail app password). First real test: Import tab → the 3 refs; the log shows `[fetch-xlsx] Gmail IMAP connected as … / Searching mailbox: … / [ref] candidate …`.
+
+**Security note (still open):** the OLD app password is on GitHub (`origin/main:.env.example`, same value as this PC's `.env`) — now revoked by the user. The user then put the **NEW** password into the working copy of `.env.example` (tracked, uncommitted, unstaged) — committing it would leak the new one the same way. It must live only in each PC's `.env` (gitignored); `.env.example` should carry a placeholder. This PC's `.env` still holds the old (revoked) password, so the app here can't log into Gmail until it is updated (the real test above injected the new one for one process only). An app password also grants IMAP read access to that whole account, not only SMTP sending. Also: while masking passwords in a check, a bug of mine printed one 4-letter group of each (old and new) into the tool output — negligible for the revoked one, but another reason to rotate if that transcript is shared.
+
+**Files changed:** `server/gmailImport.js` (new), `server/index.js`, `server/config.js`, `src/App.jsx`, `package.json`, `.env.example`.
+
+---
+
+## 2026-10-08 — Device confirmed: .eml drafts work; Import blocked by classic Outlook's full data file
+
+**.eml method validated on the device:** log `method: "eml"`, 16 PDFs; toast "Brouillon ouvert — 16 PDF joints". (Earlier `Start-Process -LiteralPath` bug fixed.)
+
+**Import still fails — now fully diagnosed (device log):** `connectionMode=400` (not connected), `windowsOpen=0` (the app starts classic hidden; `processStarted` is 19:18/19:20 → it is relaunched each import), `newestMail=2026-10-02 13:10`, **`size=47.7GB limit=50GB`**, **`Sent Items=2721`**, **`Outbox=29`**. Classic's local `.ost` is at 95 % of its limit: every LTA email carries ~10–30 MB of PDFs, and 2721 of them sit in Sent Items. That explains why classic stopped taking in mail on 02/10 and why its "Éléments envoyés" dialog appeared. The 3 refs (`235-98029853`, `065-45991864`, `235-98102233`) exist in the new Outlook, but the import can only read classic's copy. The Windows "default app" setting is irrelevant to the import (it never uses the default mail app, only classic COM); it only mattered for the email buttons.
+
+**Change (`src/App.jsx`):** the red toast now lists **every** cause found, as bullets, instead of the first one — on the device it had only said "déconnecté" and hidden the full data file. Causes: offline / disconnected, data file ≥ 90 % (with the Sent Items count), N mails stuck in the Outbox ("à vérifier avant tout nettoyage"), and the previous fallbacks only when nothing else applies. Toast detail text uses `whitespace-pre-line`. Verified in the real UI with the device's numbers (mocked response); `vite build` OK.
+
+**Warning for the device:** the 29 items in classic's Outbox exist only in classic's local file. Rebuilding/renaming the `.ost` loses them. They are probably "Envoyer par email" mails created through classic that never left — check which ones the team actually received before wiping.
+
+**Options (user to choose):** (A) repair classic — empty/archive Sent Items and rebuild the `.ost` with a 3-month sync window; fragile, it will fill again (each LTA mail adds ~30 MB). (B) Gmail IMAP import — the "LTA Complet" mails come from `tajanielidrissi.ismail@gmail.com`; if they are in that account's Sent Mail the app can fetch the `.xlsx` from there, independent of any Outlook. Needs one npm package (`imapflow`) + `npm install` on the device (auto-pull doesn't run it), and IMAP credentials in that PC's `.env`. Gate: confirm the mails are in Gmail's Sent folder.
+
+**Files changed:** `src/App.jsx`.
+
+---
+
 ## 2026-10-08 — New Outlook: drafts opened as .eml with the PDFs really attached (paste kept as fallback)
 
 **Why:** the auto-paste (entry below) depends on the draft window being in front at the right moment and on the new Outlook accepting pasted files. The user found a better route: an `.eml` file whose first line is `X-Unsent: 1` opens in Outlook as an **editable draft**, attachments included. Reported flaky in some new-Outlook builds (2024: opened read-only; late 2025: couldn't save as draft without a `Message-ID`, fixed later) — hence the explicit Message-ID and the fallback.

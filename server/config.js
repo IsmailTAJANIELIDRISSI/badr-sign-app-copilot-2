@@ -109,6 +109,16 @@ export const config = {
     // PDFs exceed this is split into several emails ("[1/2]", "[2/2]", ...).
     maxAttachMb: toFloat(process.env.EMAIL_MAX_ATTACH_MB, 18),
   },
+  // Import tab, Gmail source: the Gmail account that SENDS the "LTA Complet"
+  // emails is read over IMAP. It is the same account as the SMTP one above, so
+  // EMAIL_USER / EMAIL_PASS (a Gmail app password) are reused unless
+  // IMAP_USER / IMAP_PASS say otherwise. Independent of EMAIL_ENABLED.
+  imap: {
+    host: process.env.IMAP_HOST || "imap.gmail.com",
+    port: toInt(process.env.IMAP_PORT, 993),
+    user: process.env.IMAP_USER || process.env.EMAIL_USER || "",
+    pass: process.env.IMAP_PASS || process.env.EMAIL_PASS || "",
+  },
   // Recipients for the manual "Envoyer par email" button (opens an Outlook
   // draft with the PDFs attached). Distinct from the automated `email.to` list
   // above. Override per machine with OUTLOOK_TO in .env; the default below is
