@@ -4,6 +4,20 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-08 — UI reconnects to the API by itself (no more "API offline" until Refresh is clicked)
+
+**Problem (device log, right after an auto-pull):** `[ELECTRON] [API] startup timeout after 6000ms, continuing UI startup` → the UI loaded and asked `/api/config` and `/api/lta-files` at 20:58:59, but the API only began listening at 20:59:00 (`vite http proxy error … ECONNREFUSED`). `refresh()` ran once on mount, so the header stayed **"API offline"** and the list empty until the user clicked Refresh. The first start after a pull is slow (modules reload, new `gmailImport.js`/`imapflow`), so it can recur on any update.
+
+**Fix (`src/App.jsx`):** a connection-keeper effect probes `/api/config` (5 s abort, `no-store`): while **offline** it retries every **2 s** and calls `refresh()` the moment the API answers; while **online** it checks every **10 s**, and two failed checks in a row flip the header to offline (a single slow answer doesn't flash it) and recovery is automatic again. The header now reads `● API offline — reconnexion automatique…`. `apiReadyRef`/`refreshRef` keep the interval from using stale closures.
+
+**Verified** with the real UI (Vite) and the real API on 3001 under Playwright: UI opened with the API down → "offline — reconnexion automatique…"; API started ~6 s later → "connected" by itself after 2.6 s, no click; API killed → "offline" after 11.8 s; restarted → "connected" after 2.1 s; no page errors; `vite build` OK.
+
+**Not changed:** `electron/main.js` still waits only 6 s for the API before showing the window (harmless now; raising it would just delay the window).
+
+**Files changed:** `src/App.jsx`.
+
+---
+
 ## 2026-10-08 — Import tab: reads the "LTA Complet" emails from GMAIL over IMAP (Outlook only as fallback)
 
 **Why:** the import depended on classic Outlook's local mailbox copy, which on the device is stuck (data file 47.7 / 50 GB, stopped 02/10 13:10) and can't be relied on for a user who lives in the new Outlook. The user confirmed the "LTA Complet" mails are also in the sending Gmail account (`tajanielidrissi.ismail@gmail.com`), so the app now reads them there — live, no local copy, same result whichever Outlook the PC uses.

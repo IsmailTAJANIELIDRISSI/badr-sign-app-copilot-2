@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ✅ UI reconnects to the API by itself (2026-10-08)
+
+After an auto-update the API can start >6 s late and the UI stayed "API offline" until Refresh was clicked. A connection keeper now retries every 2 s while offline (loading everything as soon as the API answers) and checks every 10 s while online, so a crashed/restarted server also recovers on its own. Header: `● API offline — reconnexion automatique…`. Verified with the real UI + API (late start, kill, restart). `src/App.jsx` only. See PROGRESS.md.
+
 ### ⚠️ New Outlook: drafts opened as .eml with the PDFs attached (2026-10-08, to validate on the device)
 
 "Nouvel Outlook" mode now builds an `.eml` (`X-Unsent: 1` first line, Message-ID, To/subject, every PDF attached, empty HTML body) and opens it with the default `.eml` app (set to the new Outlook on the device). Real attachments — no clipboard, no keyboard; "Envoyer tous" runs straight through. Falls back to the paste method on any error; `NEW_OUTLOOK_METHOD=paste` in `.env` forces the paste method if this Outlook build opens `.eml` read-only. **Validate on the device:** the draft is editable, has its PDFs, can be saved/sent; log line `Mail draft opened … method: "eml"`. See PROGRESS.md. _First device run failed on `Start-Process -LiteralPath` (doesn't exist in PS 5.1) → fixed with `Invoke-Item -LiteralPath`; the paste fallback worked meanwhile (new Outlook then asks "Joindre une copie" vs OneDrive links for 14 MB → Joindre une copie)._

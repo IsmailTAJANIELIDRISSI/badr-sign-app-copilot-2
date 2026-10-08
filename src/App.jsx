@@ -615,6 +615,53 @@ function App() {
     refresh();
   }, []);
 
+  // Keep the connection to the API alive by itself. After an auto-update the API
+  // server can take longer to start than the app waits for it (it logs "startup
+  // timeout after 6000ms, continuing UI startup"), so the first requests hit a
+  // closed port and the UI stayed "API offline" until Refresh was clicked.
+  // While offline: retry every 2 s and load everything the moment it answers.
+  // While online: check every 10 s, so a crashed server shows "offline" and
+  // recovers on its own too (two failed checks in a row before flipping, so a
+  // single slow answer doesn't flash "offline").
+  const apiReadyRef = useRef(false);
+  const refreshRef = useRef(refresh);
+  apiReadyRef.current = apiReady;
+  refreshRef.current = refresh;
+  useEffect(() => {
+    let stopped = false;
+    let timer;
+    let failures = 0;
+    const probe = async () => {
+      const ctrl = new AbortController();
+      const abort = setTimeout(() => ctrl.abort(), 5000);
+      try {
+        const r = await fetch("/api/config", { cache: "no-store", signal: ctrl.signal });
+        return r.ok;
+      } catch {
+        return false;
+      } finally {
+        clearTimeout(abort);
+      }
+    };
+    const tick = async () => {
+      const up = await probe();
+      if (stopped) return;
+      if (up) {
+        failures = 0;
+        if (!apiReadyRef.current) await refreshRef.current(); // came (back) online
+      } else {
+        failures += 1;
+        if (apiReadyRef.current && failures >= 2) setApiReady(false);
+      }
+      if (!stopped) timer = setTimeout(tick, up && apiReadyRef.current ? 10000 : 2000);
+    };
+    timer = setTimeout(tick, 2000);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
   useEffect(() => {
     if (!jobId) return;
     const timer = setInterval(async () => {
@@ -878,7 +925,9 @@ function App() {
                 {apiReady ? (
                   <span className="text-emerald-600">● API connected</span>
                 ) : (
-                  <span className="text-rose-500">● API offline</span>
+                  <span className="text-rose-500">
+                    ● API offline — reconnexion automatique…
+                  </span>
                 )}
                 {ltaFiles.length > 0 && (
                   <span className="text-steel">
