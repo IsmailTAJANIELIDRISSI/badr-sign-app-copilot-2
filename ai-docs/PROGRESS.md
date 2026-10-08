@@ -20,6 +20,10 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 **Device prerequisite (done by the user):** `.eml` → Outlook (new) in Windows default apps.
 
+**Bug on first device run (fixed):** `eml draft failed — Start-Process : Impossible de trouver un paramètre correspondant au nom « LiteralPath »` — Windows PowerShell 5.1's `Start-Process` has no `-LiteralPath` (only `-FilePath`); I hadn't checked the parameter binding. Now `Invoke-Item -LiteralPath` (exists in 5.1, opens with the default app, no wildcard parsing of the `(16 DUM)` parentheses). Verified on PS 5.1: `Start-Process` lacks the parameter, `Invoke-Item` has it, and the exact server command binds and runs in `-WhatIf` on a draft-named file (exit 0). The fallback did its job on that run: `method: "clipboard" … pasted: "sent"`.
+
+**Learned from that run — the new Outlook accepts pasted files:** after the auto-paste it asked _« Comment voulez-vous partager ces fichiers ? Vos fichiers sont assez volumineux (14 Mo)… »_ → "Charger et partager sous la forme de liens OneDrive" / **"Joindre une copie"**. The right choice is **Joindre une copie** (the team receives the PDFs themselves; OneDrive links point into the sender's OneDrive). With the .eml method the PDFs are already inside the message, so this prompt shouldn't appear.
+
 **Files changed:** `server/index.js`, `src/App.jsx`, `.env.example`.
 
 ---

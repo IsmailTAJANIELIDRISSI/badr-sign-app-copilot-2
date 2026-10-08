@@ -6,7 +6,7 @@
 
 ### ⚠️ New Outlook: drafts opened as .eml with the PDFs attached (2026-10-08, to validate on the device)
 
-"Nouvel Outlook" mode now builds an `.eml` (`X-Unsent: 1` first line, Message-ID, To/subject, every PDF attached, empty HTML body) and opens it with the default `.eml` app (set to the new Outlook on the device). Real attachments — no clipboard, no keyboard; "Envoyer tous" runs straight through. Falls back to the paste method on any error; `NEW_OUTLOOK_METHOD=paste` in `.env` forces the paste method if this Outlook build opens `.eml` read-only. **Validate on the device:** the draft is editable, has its PDFs, can be saved/sent; log line `Mail draft opened … method: "eml"`. See PROGRESS.md.
+"Nouvel Outlook" mode now builds an `.eml` (`X-Unsent: 1` first line, Message-ID, To/subject, every PDF attached, empty HTML body) and opens it with the default `.eml` app (set to the new Outlook on the device). Real attachments — no clipboard, no keyboard; "Envoyer tous" runs straight through. Falls back to the paste method on any error; `NEW_OUTLOOK_METHOD=paste` in `.env` forces the paste method if this Outlook build opens `.eml` read-only. **Validate on the device:** the draft is editable, has its PDFs, can be saved/sent; log line `Mail draft opened … method: "eml"`. See PROGRESS.md. _First device run failed on `Start-Process -LiteralPath` (doesn't exist in PS 5.1) → fixed with `Invoke-Item -LiteralPath`; the paste fallback worked meanwhile (new Outlook then asks "Joindre une copie" vs OneDrive links for 14 MB → Joindre une copie)._
 
 ### ⚠️ New Outlook: PDFs pasted into the draft automatically (2026-10-08, superseded by .eml as default — kept as fallback)
 

@@ -366,13 +366,20 @@ const writeDraftEml = async ({ to, subject, pdfs }) => {
   return file;
 };
 
-/** Open a file with its Windows default app (ShellExecute), e.g. .eml → Outlook. */
+/**
+ * Open a file with its Windows default app (its default "open" action), e.g.
+ * .eml → the new Outlook. Invoke-Item, not Start-Process: Windows PowerShell
+ * 5.1's Start-Process has no -LiteralPath (device: "Impossible de trouver un
+ * paramètre correspondant au nom LiteralPath"), and -LiteralPath keeps the
+ * "(19 DUM)" parentheses / any brackets in the file name from being read as
+ * wildcards.
+ */
 const openWithDefaultApp = async (file) => {
   const { execFile } = await import("child_process");
   await new Promise((resolve, reject) =>
     execFile(
       "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", `Start-Process -LiteralPath ${psq(file)}`],
+      ["-NoProfile", "-NonInteractive", "-Command", `Invoke-Item -LiteralPath ${psq(file)}`],
       { timeout: 20000, windowsHide: true },
       (err, _stdout, stderr) => (err ? reject(new Error(stderr || err.message)) : resolve()),
     ),
