@@ -4,6 +4,26 @@ _Populated as we work. Each entry = problem + solution + files changed._
 
 ---
 
+## 2026-10-08 — New Outlook: the app pastes the PDFs into the draft itself + "open folder" error fixed
+
+**Context:** on the device the new Outlook is now the Windows default mail app, so the "Nouvel Outlook" mode opens the draft there (To + subject filled). The user wants the PDFs attached automatically instead of pressing Ctrl+V.
+
+**Constraint:** the new Outlook offers no way for another program to attach files (no COM, no command-line attach, `mailto:` can't carry attachments). Truly server-side attachments would need Microsoft Graph (Entra ID app registration on medafrica-log.com). What *is* possible locally: the PDFs are already on the clipboard as files, and the draft window is titled with the subject.
+
+**Fix — auto-paste (`server/index.js`, mailto path):** after `Start-Process mailto:` the script waits (up to `MAILTO_PASTE_WAIT_SEC`, default 20 s) until the **foreground** window's title contains the subject (`MAWB {ref} - ({n} DUM)`, unique per LTA; matched with `WildcardPattern.Escape`, read via a small `user32` `GetForegroundWindow`/`GetWindowText` helper). It nudges the draft forward with `WScript.Shell.AppActivate` if it opened behind, waits 2 s for the compose to finish loading (cursor lands in the body), re-checks the draft is still in front, then `SendKeys ^v`. It never pastes into any other window. Reports `PASTE=sent|nowindow|lostfocus|error` → JSON `pasted`. `execFile` timeout = 40 s + the wait.
+
+**Frontend (`src/App.jsx`):**
+- single LTA, pasted → green toast "Email ouvert — N PDF collés automatiquement — vérifiez les pièces jointes…"; not pasted → the previous manual path (folder opened + Ctrl+V alert).
+- **Envoyer tous**, new mode → runs on its own (each draft opened + pasted before the next overwrites the clipboard); pauses with the manual "Ctrl+V puis OK" confirm only for an email that couldn't be pasted. The opening confirm warns not to touch keyboard/mouse during the run; the summary shows `PDF collés automatiquement : x / n`.
+
+**Fix — "Error opening folder" (`electron/main.js`):** the device log showed `Command failed: explorer.exe /select,"C:\sign\outputs\LTA N° … READY"` on every call. `explorer.exe` always exits with code 1, so `execSync` threw even though the window opened (and building a shell command from a path was an injection risk — old TASKS item #6). Now `shell.openPath(path.resolve(folder))`, which opens the folder itself (PDFs visible, ready to drag). **Main-process change → full app relaunch needed.**
+
+**Verified:** both email scripts (classic + new) parse; a probe compiles the window-title helper and confirms the subject pattern matches its own title (also with an app suffix) but not another LTA's; `node --check` server + electron main; `vite build` OK. **Not verified (needs the device):** that the new Outlook attaches files pasted with Ctrl+V, and that the draft gets focus in time — check the log line `Mail draft opened … pasted: "sent"` and the attachments in the draft.
+
+**Files changed:** `server/index.js`, `src/App.jsx`, `electron/main.js`.
+
+---
+
 ## 2026-10-06 — Device: classic Outlook CONNECTED (700) but still stuck → diagnostic now reports its data file
 
 **Data from the device:** `connectionMode=700 workOffline=False windowsOpen=0`, `newestMail=2026-10-02 13:10`, `totalItems=6458` (identical on every run). So classic **is connected to Exchange** and still stores no new mail → not a sign-in/connection problem. It fits classic's own dialog ("Éléments envoyés contient le nombre maximal d'éléments… les messages envoyés seront enregistrés dans la Boîte d'envoi"): classic can't write new items locally.

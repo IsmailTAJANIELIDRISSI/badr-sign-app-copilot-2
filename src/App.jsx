@@ -367,8 +367,19 @@ function App() {
         setEmailState((p) => ({ ...p, [item.fileName]: "sent" }));
         // Classic Outlook (COM) attaches automatically. The clipboard fallback
         // (new Outlook / web) opens compose with the PDFs on the clipboard.
-        if (!silent && data.mode === "new") {
-          // Drag-and-drop fallback in case Ctrl+V doesn't attach files.
+        if (!silent && data.mode === "new" && data.pasted === "sent") {
+          // The server pressed Ctrl+V in the draft itself (new Outlook can't be
+          // handed attachments any other way) — just remind to check.
+          pushToast({
+            tone: "success",
+            title: `Email ouvert — ${data.count} PDF collés automatiquement`,
+            detail:
+              `LTA ${item.ltaRef} : vérifiez les pièces jointes avant d'envoyer. ` +
+              "S'il en manque, faites Ctrl+V dans le message (les PDF sont toujours copiés).",
+          });
+        } else if (!silent && data.mode === "new") {
+          // Auto-paste didn't happen (draft never came to the front, or focus
+          // moved): manual Ctrl+V, with the folder open for drag-and-drop.
           if (isElectron && data.folder) window.electronAPI.openFolder(data.folder);
           alert(
             `Nouvel Outlook : l'email est ouvert avec les destinataires et l'objet.\n\n` +
@@ -386,7 +397,7 @@ function App() {
               diag,
           );
         }
-        return { ok: true, method: data.method, count: data.count };
+        return { ok: true, method: data.method, count: data.count, pasted: data.pasted };
       }
       setEmailState((p) => ({ ...p, [item.fileName]: "error" }));
       if (!silent) alert(data.reason || "Could not open the Outlook draft.");
@@ -416,8 +427,9 @@ function App() {
 
   // Bulk: open an Outlook draft for every selected LTA, one at a time (COM can't
   // be driven in parallel). One summary at the end instead of N alerts.
-  // New Outlook: the clipboard holds one LTA's PDFs at a time, so it pauses
-  // after each email until the user has pasted them and clicks OK.
+  // New Outlook: the server pastes each LTA's PDFs into its draft itself, so it
+  // runs on its own; only when that paste didn't happen does it pause (the
+  // clipboard holds one LTA's PDFs at a time) until the user pastes and clicks OK.
   const sendAllEmails = async () => {
     const items = orderedItems.filter((it) => selected[it.fileName]);
     if (!items.length) return;
@@ -425,11 +437,10 @@ function App() {
     if (
       !window.confirm(
         isNew
-          ? `Ouvrir ${items.length} email(s) dans le nouvel Outlook, un par un ?\n\n` +
-              `Pour chacun, les PDF sont copiés : collez-les dans le message avec Ctrl+V, ` +
-              `puis revenez ici et cliquez OK pour ouvrir le suivant.\n\n` +
-              `(Si Ctrl+V n'attache rien, utilisez le bouton « Envoyer par email » de chaque LTA : ` +
-              `il ouvre aussi le dossier des PDF à glisser.)`
+          ? `Ouvrir ${items.length} email(s) dans le nouvel Outlook ?\n\n` +
+              `L'app ouvre chaque email et y colle ses PDF automatiquement (≈ 5 s par email). ` +
+              `Ne touchez ni au clavier ni à la souris pendant l'opération.\n\n` +
+              `Vérifiez ensuite les pièces jointes de chaque email avant d'envoyer.`
           : `Créer un brouillon Outlook pour ${items.length} LTA ?\n\n` +
               `Chaque brouillon s'ouvre avec ses PDF signés joints.`,
       )
@@ -437,6 +448,7 @@ function App() {
       return;
     setSendingAll(true);
     let ok = 0;
+    let autoPasted = 0;
     const failed = [];
     let stoppedAt = null;
     try {
@@ -445,9 +457,11 @@ function App() {
         const res = await sendEmailRequest(item, { silent: true });
         if (res.ok) ok++;
         else failed.push(item.ltaRef);
-        if (isNew && res.ok && i < items.length - 1) {
+        if (res.pasted === "sent") autoPasted++;
+        if (isNew && res.ok && res.pasted !== "sent" && i < items.length - 1) {
           const next = window.confirm(
-            `Email ${i + 1}/${items.length} ouvert : LTA ${item.ltaRef} (${res.count} PDF copiés).\n\n` +
+            `Email ${i + 1}/${items.length} ouvert : LTA ${item.ltaRef} (${res.count} PDF copiés), ` +
+              `mais l'app n'a pas pu les coller elle-même.\n\n` +
               `Collez les PDF avec Ctrl+V dans le message, puis cliquez OK pour ouvrir le suivant.\n` +
               `(Annuler = arrêter ici.)`,
           );
@@ -461,10 +475,15 @@ function App() {
       setSendingAll(false);
       items.forEach((it) => clearEmailStateSoon(it.fileName));
     }
+    const lastNotPasted =
+      isNew && ok && stoppedAt == null && autoPasted < ok;
     alert(
       (isNew ? `Emails ouverts : ${ok} / ${items.length}` : `Brouillons créés : ${ok} / ${items.length}`) +
-        (isNew && ok && stoppedAt == null
-          ? `\n\nPour le dernier email, collez ses PDF avec Ctrl+V.`
+        (isNew && ok
+          ? `\nPDF collés automatiquement : ${autoPasted} / ${ok} — vérifiez les pièces jointes avant d'envoyer.`
+          : "") +
+        (lastNotPasted
+          ? `\n\nSi le dernier email n'a pas ses PDF, collez-les avec Ctrl+V.`
           : "") +
         (stoppedAt != null ? `\n\nArrêté après ${stoppedAt} email(s).` : "") +
         (failed.length ? `\n\nÉchecs (non signés ?) :\n${failed.join("\n")}` : ""),

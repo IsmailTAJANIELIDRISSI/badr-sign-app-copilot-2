@@ -302,6 +302,13 @@ const findLtaPdfs = async (ltaRef) => {
 // Single-quote a value for safe embedding in a PowerShell script.
 const psq = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
+// mailto path (new Outlook): how long to wait for the draft window to come to
+// the front before giving up on the automatic Ctrl+V of the PDFs.
+const MAILTO_PASTE_WAIT_SEC = Math.max(
+  0,
+  Number.parseInt(process.env.MAILTO_PASTE_WAIT_SEC || "20", 10) || 0,
+);
+
 app.post("/api/lta/outlook-email", async (req, res) => {
   // mode "new" = the user works in the NEW Outlook (chosen in the app, per
   // device): skip classic-Outlook COM entirely and go straight to the mailto +
@@ -379,10 +386,53 @@ if ($useCom) {
 }
 if (-not $opened) {
   try { Set-Clipboard -LiteralPath $files } catch {}
-  $uri = 'mailto:' + ${psq(mailtoTo)} + '?subject=' + [uri]::EscapeDataString(${psq(subject)})
+  $subject = ${psq(subject)}
+  $uri = 'mailto:' + ${psq(mailtoTo)} + '?subject=' + [uri]::EscapeDataString($subject)
   Start-Process $uri
   Write-Output 'METHOD=clipboard'
   Write-Output ('ELEVATED=' + $isAdmin)
+
+  # Auto-paste: the new Outlook can't be given attachments by another program,
+  # but it attaches files pasted into a message. Its compose window is titled
+  # with the subject (unique per LTA), so: wait until THAT window is in front,
+  # give it time to finish loading (the cursor lands in the body), then press
+  # Ctrl+V. Never pastes unless the front window is this draft.
+  $pasted = 'nowindow'
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class BadrFg {
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  public static string Title() { var sb = new StringBuilder(512); GetWindowText(GetForegroundWindow(), sb, 512); return sb.ToString(); }
+}
+"@
+    $wsh = New-Object -ComObject WScript.Shell
+    $pattern = '*' + [Management.Automation.WildcardPattern]::Escape($subject) + '*'
+    $deadline = (Get-Date).AddSeconds(${MAILTO_PASTE_WAIT_SEC})
+    while ((Get-Date) -lt $deadline) {
+      Start-Sleep -Milliseconds 500
+      if ([BadrFg]::Title() -like $pattern) {
+        Start-Sleep -Milliseconds 2000
+        if ([BadrFg]::Title() -like $pattern) {
+          [System.Windows.Forms.SendKeys]::SendWait('^v')
+          $pasted = 'sent'
+        } else {
+          $pasted = 'lostfocus'
+        }
+        break
+      }
+      # The draft exists but opened behind another window: bring it forward.
+      try { [void]$wsh.AppActivate($subject) } catch {}
+    }
+  } catch {
+    $pasted = 'error'
+    Write-Output ('PASTEERR=' + ($_.Exception.Message -replace "\\r?\\n"," "))
+  }
+  Write-Output ('PASTE=' + $pasted)
 }
 `;
 
@@ -407,7 +457,8 @@ if (-not $opened) {
         "-File",
         scriptPath,
       ],
-      { timeout: 40000, windowsHide: true },
+      // 40 s for Outlook itself + the auto-paste wait (mailto path).
+      { timeout: 40000 + MAILTO_PASTE_WAIT_SEC * 1000, windowsHide: true },
       (err, stdout, stderr) => {
         fs.remove(scriptPath).catch(() => {});
         const out = String(stdout || "");
@@ -429,8 +480,12 @@ if (-not $opened) {
         const method = out.includes("METHOD=com") ? "com" : "clipboard";
         const comErr = out.match(/COMERR=(.*)/)?.[1]?.trim();
         const elevated = /ELEVATED=True/i.test(out);
+        // mailto path: did the app press Ctrl+V in the draft? "sent" | "nowindow"
+        // (draft never came to the front) | "lostfocus" | "error" | null (COM).
+        const pasted = out.match(/^PASTE=(\w+)/m)?.[1] || null;
+        const pasteErr = out.match(/PASTEERR=(.*)/)?.[1]?.trim();
         logger.info(
-          { ltaRef, count: pdfs.length, method, mode: useCom ? "classic" : "new", comErr, elevated },
+          { ltaRef, count: pdfs.length, method, mode: useCom ? "classic" : "new", pasted, pasteErr, comErr, elevated },
           "Mail draft opened",
         );
         res.json({
@@ -440,6 +495,7 @@ if (-not $opened) {
           folder,
           method,
           mode: useCom ? "classic" : "new",
+          pasted,
           comErr,
           elevated,
         });

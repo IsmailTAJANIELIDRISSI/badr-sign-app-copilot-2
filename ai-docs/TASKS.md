@@ -4,6 +4,10 @@
 
 ## Recently Completed
 
+### ⚠️ New Outlook: PDFs pasted into the draft automatically (2026-10-08, to validate on the device)
+
+"Nouvel Outlook" mode: after opening the draft, the app waits for the window titled with the subject to be in front and presses Ctrl+V itself (PDFs are on the clipboard); "Envoyer tous" now runs unattended and only pauses for an email it couldn't paste into. Also fixed the `Error opening folder` log (explorer.exe exit code) with `shell.openPath`. **Validate on the device:** full relaunch (Electron main changed), then check the draft has its PDFs and the log shows `pasted: "sent"`. If the new Outlook ignores pasted files, the only route to real automatic attachments is Microsoft Graph (needs an Entra ID app registration). See PROGRESS.md.
+
 ### ✅ "Outlook classique / Nouvel Outlook" switch for the email buttons (2026-10-06)
 
 Header switch, saved per device. **Nouvel Outlook** skips classic-Outlook COM: the email opens in the default mail app with To/subject filled and the PDFs copied for Ctrl+V; "Envoyer tous" goes one LTA at a time with an OK between each. Requires the new Outlook to be the Windows default e-mail app. Also: the Import's sync wait now stops after 15 s when classic stays disconnected. **To check on the device:** does Ctrl+V attach the PDFs in the new Outlook? (Fallback: drag from the folder that opens.) **Still open:** Import can't use the new Outlook — needs a healthy classic Outlook, or a Gmail IMAP / Microsoft Graph source. See PROGRESS.md.
@@ -172,9 +176,11 @@ Cell `H1` of each generated Excel now provides the shipper name. The app reads i
 
 ---
 
-### 6. `electron/main.js` `open-folder` IPC Uses `execSync`
+### 6. ✅ FIXED 2026-10-08 — `electron/main.js` `open-folder` IPC Uses `execSync`
 
-**Problem:** The `open-folder` IPC handler uses `execSync('explorer.exe /select,"..."')` instead of the already-imported `shell.openPath()`. This is a security risk (command injection if folder path contains special characters) and is also less reliable.  
+_Now `shell.openPath` (see PROGRESS.md 2026-10-08). It was also logging `Error opening folder: Command failed` on every call because `explorer.exe` always exits with code 1._
+
+**Problem (historical):** The `open-folder` IPC handler uses `execSync('explorer.exe /select,"..."')` instead of the already-imported `shell.openPath()`. This is a security risk (command injection if folder path contains special characters) and is also less reliable.  
 **Impact:** Minor security risk; `shell.openPath` is already available and preferred.  
 **Location:** `electron/main.js` `ipcMain.handle("open-folder", ...)`.
 
@@ -242,7 +248,7 @@ Cell `H1` of each generated Excel now provides the shipper name. The app reads i
 
 4. **Add DUM range selector to UI** — Add two number inputs per LTA card (`From DUM` / `To DUM`). Pass them in the `POST /api/jobs/run` body. Filter `lta.dums` in `runSigningJob()` before iterating.
 
-5. **Fix Electron `open-folder` IPC** — Replace `execSync` with `shell.openPath(folderPath)` in `electron/main.js`.
+5. ✅ ~~**Fix Electron `open-folder` IPC**~~ — done 2026-10-08 (`shell.openPath`).
 
 6. **Create `.env.example`** — Document all env vars with safe placeholder values so new developers have a complete template.
 

@@ -238,15 +238,18 @@ ipcMain.handle("output-folder", async () => {
   return outputDir;
 });
 
+// shell.openPath, not `execSync("explorer.exe /select,…")`: explorer.exe always
+// exits with code 1, so execSync threw ("Error opening folder: Command failed")
+// even when the window opened — and building a shell command from a path is an
+// injection risk. openPath opens the folder itself (its files are visible, ready
+// to drag) and returns "" on success or an error message.
 ipcMain.handle("open-folder", async (_event, folderPath) => {
   try {
-    const { execSync } = await import("child_process");
-    if (process.platform === "win32") {
-      execSync(`explorer.exe /select,"${folderPath}"`);
-    } else if (process.platform === "darwin") {
-      execSync(`open -R "${folderPath}"`);
-    } else {
-      execSync(`xdg-open "${path.dirname(folderPath)}"`);
+    if (!folderPath) return false;
+    const err = await shell.openPath(path.resolve(folderPath));
+    if (err) {
+      console.error("open-folder failed:", err);
+      return false;
     }
     return true;
   } catch (error) {
