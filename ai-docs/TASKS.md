@@ -4,6 +4,14 @@
 
 ## Recently Completed
 
+### 🚨 URGENT — new Gmail app password is on a PUBLIC GitHub repo (2026-10-13)
+
+The rotated app password was put into the tracked `.env.example` and pushed (`origin/main` has it; repo `IsmailTAJANIELIDRISSI/badr-sign-app-copilot-2` is public; the old one is in history too). **Revoke it now** (Google → Sécurité → Mots de passe des applications), create a new one, put it ONLY in each PC's `.env`, and check the account's recent activity. `.env.example` now carries the placeholder `your-gmail-app-password` (uncommitted — commit it, without any real secret). See PROGRESS.md.
+
+### ✅ Gmail import: plain "generated_excel.xlsx" attachments (2026-10-13)
+
+Newer "LTA Complet" mails attach `generated_excel.xlsx` (no ref in the name) and were reported "sans .xlsx". Now the mail's only `.xlsx` is accepted, stored as `generated_excel - <ref>.xlsx`, and its internal LTA ref must equal the requested ref or it is refused (wrong-LTA protection); ambiguous multi-xlsx mails are flagged. Verified on a fake IMAP server and on real Gmail (6 refs, read-only). `server/gmailImport.js`, `server/excelParser.js`. See PROGRESS.md.
+
 ### ✅ UI reconnects to the API by itself (2026-10-08)
 
 After an auto-update the API can start >6 s late and the UI stayed "API offline" until Refresh was clicked. A connection keeper now retries every 2 s while offline (loading everything as soon as the API answers) and checks every 10 s while online, so a crashed/restarted server also recovers on its own. Header: `● API offline — reconnexion automatique…`. Verified with the real UI + API (late start, kill, restart). `src/App.jsx` only. See PROGRESS.md.

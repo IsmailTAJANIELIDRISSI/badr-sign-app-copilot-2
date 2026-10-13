@@ -2,10 +2,12 @@ import path from "path";
 import fs from "fs-extra";
 import { pipeline } from "stream/promises";
 import { config } from "./config.js";
+import { readLtaRef } from "./excelParser.js";
 
-// Import tab, Gmail source: read the "LTA Complet" emails (and their
-// generated_excel - <ref>.xlsx attachment) straight from the Gmail account that
-// sends them, over IMAP — independent of Outlook, classic or new.
+// Import tab, Gmail source: read the "LTA Complet" emails (and their .xlsx
+// attachment — "generated_excel - <ref>.xlsx", or just "generated_excel.xlsx" in
+// newer emails) straight from the Gmail account that sends them, over IMAP —
+// independent of Outlook, classic or new.
 //
 // NOTE: `imapflow` is imported LAZILY, like nodemailer in notifications.js. A
 // static import would crash the whole API server on a machine where
@@ -86,26 +88,53 @@ export const unnamedLeafParts = (node, out = []) => {
   return out;
 };
 
+/** File name of a leaf node: from the parsed structure, else from its MIME headers. */
+const leafName = (node, names) =>
+  node.dispositionParameters?.filename || node.parameters?.name || names[node.part || "1"] || "";
+
 /**
- * Every .xlsx attachment in an IMAP BODYSTRUCTURE tree whose file name contains
- * `ref`. Nodes follow imapflow's shape: { part, type, parameters,
- * dispositionParameters, childNodes }. A single-part message has no `part`
- * (its body is part "1"). `names` maps a part id to a file name read from its
- * MIME headers, for parts the structure left unnamed (see filenameFromMimeHeader).
+ * Names of every non-text attachment in an IMAP BODYSTRUCTURE tree (for the
+ * diagnostic log). `names` maps a part id to a name read from its MIME headers.
  */
-export const findXlsxParts = (node, ref, names = {}, out = []) => {
+export const attachmentNames = (node, names = {}, out = []) => {
   if (!node) return out;
   if (Array.isArray(node.childNodes) && node.childNodes.length) {
-    for (const child of node.childNodes) findXlsxParts(child, ref, names, out);
+    for (const child of node.childNodes) attachmentNames(child, names, out);
     return out;
   }
-  const part = node.part || "1";
-  const filename =
-    node.dispositionParameters?.filename || node.parameters?.name || names[part] || "";
-  if (/\.xlsx$/i.test(filename) && filename.includes(ref)) {
-    out.push({ part, filename });
-  }
+  if (!/^text\//i.test(node.type || "")) out.push(leafName(node, names) || `(sans nom, ${node.type || "?"})`);
   return out;
+};
+
+/**
+ * Every .xlsx attachment in an IMAP BODYSTRUCTURE tree. Nodes follow imapflow's
+ * shape: { part, type, parameters, dispositionParameters, childNodes }. A
+ * single-part message has no `part` (its body is part "1"). `names` maps a part
+ * id to a file name read from its MIME headers, for parts the structure left
+ * unnamed (see filenameFromMimeHeader).
+ */
+export const findXlsxParts = (node, names = {}, out = []) => {
+  if (!node) return out;
+  if (Array.isArray(node.childNodes) && node.childNodes.length) {
+    for (const child of node.childNodes) findXlsxParts(child, names, out);
+    return out;
+  }
+  const filename = leafName(node, names);
+  if (/\.xlsx$/i.test(filename)) out.push({ part: node.part || "1", filename });
+  return out;
+};
+
+/**
+ * Which of a mail's .xlsx parts to import for `ref`: those whose name contains
+ * the ref ("generated_excel - 235-98898074.xlsx"); failing that, the only .xlsx
+ * of the mail — newer emails attach a plain "generated_excel.xlsx" without the
+ * ref, the subject (already matched on the ref) being what identifies the LTA.
+ * Several .xlsx and none named with the ref is ambiguous → nothing is chosen.
+ */
+export const choosePartsForRef = (xlsxParts, ref) => {
+  const named = xlsxParts.filter((p) => p.filename.includes(ref));
+  if (named.length) return named;
+  return xlsxParts.length === 1 ? xlsxParts : [];
 };
 
 // "[ERREUR DUM] LTA Complet - …": the generator flags a faulty run in the subject.
@@ -114,24 +143,27 @@ const isErrorMail = (subject) => /\[\s*erreur/i.test(subject);
 /**
  * Pick the email to import for `ref` among fetched candidates
  * ({ uid, subject, date, structure, names }): subject contains the ref AND the
- * keyword (default "complet") AND the message carries an .xlsx named with the
- * ref. Emails NOT flagged "[ERREUR …]" win over flagged ones even when older
- * (importing a faulty Excel would mean signing wrong DUMs); among equals the
- * most recent wins (a later "Updated" resend replaces an earlier one).
+ * keyword (default "complet") AND the message carries an .xlsx (see
+ * choosePartsForRef). Emails NOT flagged "[ERREUR …]" win over flagged ones even
+ * when older (importing a faulty Excel would mean signing wrong DUMs); among
+ * equals the most recent wins (a later "Updated" resend replaces an earlier one).
  * `best.errorMail` is set when only flagged emails exist. `noXlsx` is set when a
- * matching email exists but has no such attachment.
+ * matching email exists but has no usable .xlsx (`ambiguous` when it has several).
  */
 export const pickCandidate = (candidates, ref, keyword) => {
   const refLc = ref.toLowerCase();
   const kw = keyword.toLowerCase();
   let best = null;
   let noXlsx = false;
+  let ambiguous = false;
   for (const c of candidates) {
     const subject = String(c.subject || "").toLowerCase();
     if (!subject.includes(refLc) || !subject.includes(kw)) continue;
-    const parts = findXlsxParts(c.structure, ref, c.names);
+    const xlsxParts = findXlsxParts(c.structure, c.names);
+    const parts = choosePartsForRef(xlsxParts, ref);
     if (!parts.length) {
       noXlsx = true;
+      if (xlsxParts.length > 1) ambiguous = true;
       continue;
     }
     const errorMail = isErrorMail(subject);
@@ -142,7 +174,7 @@ export const pickCandidate = (candidates, ref, keyword) => {
       (best.errorMail === errorMail && (time > best.time || (time === best.time && c.uid > best.uid)));
     if (better) best = { ...c, parts, time, errorMail };
   }
-  return { best, noXlsx };
+  return { best, noXlsx, ambiguous };
 };
 
 const classify = (err) => {
@@ -269,17 +301,25 @@ export const fetchXlsxFromGmail = async ({ refs, dest, keyword = "complet" }) =>
               log(`[${ref}] uid=${c.uid} could not read attachment headers: ${err.message}`);
             }
           }
-          for (const c of candidates.slice(0, 10))
+          for (const c of candidates.slice(0, 10)) {
+            const atts = attachmentNames(c.structure, c.names || {});
             log(
               `[${ref}] candidate uid=${c.uid} ${c.date ? new Date(c.date).toISOString().slice(0, 16) : "?"} subj=${c.subject}` +
-                (c.names && Object.keys(c.names).length ? ` attachments=${Object.values(c.names).join(" | ")}` : ""),
+                (atts.length ? ` attachments=${atts.join(" | ")}` : ""),
             );
+          }
 
-          const { best, noXlsx } = pickCandidate(candidates, ref, keyword);
+          const { best, noXlsx, ambiguous } = pickCandidate(candidates, ref, keyword);
           if (!best) {
             results.push(
               noXlsx
-                ? { ref, status: "no_xlsx", detail: "Email trouvé dans Gmail mais aucune pièce .xlsx nommée avec la ref" }
+                ? {
+                    ref,
+                    status: "no_xlsx",
+                    detail: ambiguous
+                      ? "Email trouvé dans Gmail avec plusieurs pièces .xlsx, aucune nommée avec la ref — impossible de choisir"
+                      : "Email trouvé dans Gmail mais aucune pièce .xlsx",
+                  }
                 : { ref, status: "not_found", detail: `Aucun email « ${keyword} » avec pièce .xlsx pour ${ref} dans Gmail` },
             );
             continue;
@@ -288,19 +328,45 @@ export const fetchXlsxFromGmail = async ({ refs, dest, keyword = "complet" }) =>
 
           const saved = [];
           for (const p of best.parts) {
-            const { content } = await client.download(String(best.uid), p.part, { uid: true });
-            const file = path.join(dest, sanitizeFileName(p.filename));
-            await pipeline(content, fs.createWriteStream(file));
-            // An .xlsx is a zip ("PK"): guards against a body saved still encoded.
-            const head = Buffer.alloc(2);
-            const fd = await fs.open(file, "r");
-            await fs.read(fd, head, 0, 2, 0);
-            await fs.close(fd);
-            if (head.toString("latin1") !== "PK") {
-              await fs.remove(file).catch(() => {});
-              throw new Error(`Le fichier ${p.filename} téléchargé n'est pas un .xlsx valide`);
+            // Always stored as "generated_excel - <ref>.xlsx" when the attachment
+            // is just "generated_excel.xlsx" — the file name is the app's key for
+            // an LTA, so two plain names would overwrite each other.
+            const finalName = p.filename.includes(ref)
+              ? sanitizeFileName(p.filename)
+              : `generated_excel - ${ref}.xlsx`;
+            const finalPath = path.join(dest, finalName);
+            // Download beside the final name and only move it in once it checks
+            // out, so a bad download never replaces a good earlier copy.
+            const tmpPath = path.join(dest, `.${finalName}.part`);
+            try {
+              const { content } = await client.download(String(best.uid), p.part, { uid: true });
+              await pipeline(content, fs.createWriteStream(tmpPath));
+              // An .xlsx is a zip ("PK"): guards against a body saved still encoded.
+              const head = Buffer.alloc(2);
+              const fd = await fs.open(tmpPath, "r");
+              await fs.read(fd, head, 0, 2, 0);
+              await fs.close(fd);
+              if (head.toString("latin1") !== "PK")
+                throw new Error(`Le fichier ${p.filename} téléchargé n'est pas un .xlsx valide`);
+              // The app derives the LTA from the file's CONTENT: it must be the
+              // one asked for, or the wrong LTA would be signed under this ref.
+              let inside;
+              try {
+                inside = readLtaRef(tmpPath);
+              } catch (e) {
+                throw new Error(`Le fichier ${p.filename} est illisible (${e.message})`);
+              }
+              if (inside !== ref)
+                throw new Error(
+                  inside
+                    ? `Le fichier ${p.filename} de l'email contient la LTA ${inside} et non ${ref} — non importé`
+                    : `Aucune référence LTA lisible dans ${p.filename} — non importé`,
+                );
+              await fs.move(tmpPath, finalPath, { overwrite: true });
+            } finally {
+              await fs.remove(tmpPath).catch(() => {});
             }
-            saved.push(path.basename(file));
+            saved.push(finalName);
           }
           results.push({
             ref,

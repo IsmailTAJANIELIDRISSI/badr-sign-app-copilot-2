@@ -134,6 +134,12 @@ const extractDumsByLabels = (sheet) => {
   return [...byNumber.values()].sort((a, b) => a.dumNumber - b.dumNumber);
 };
 
+/** The LTA ref found in the workbook's first sheet (null if none) — what the app will show. */
+export const readLtaRef = (filePath) => {
+  const workbook = xlsx.readFile(filePath, { cellDates: false });
+  return extractLtaRef(workbook.Sheets[workbook.SheetNames[0]]);
+};
+
 export const parseLtaExcel = (filePath) => {
   const workbook = xlsx.readFile(filePath, { cellDates: false });
   const firstSheetName = workbook.SheetNames[0];
