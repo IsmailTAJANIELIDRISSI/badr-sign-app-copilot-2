@@ -131,6 +131,7 @@ export const config = {
     "Nouhaila ORFANE <nouhaila.orfane@medafrica-log.com>",
     "OUSSAMA FARIS <OUSSAMA.FARIS@medafrica-log.com>",
     "Hamza KNINIS <hamza.kninis@medafrica-log.com>",
+    "Nouhaila ELALLALI <nouhaila.elallali@medafrica-log.com>",
   ]),
   whatsapp: {
     enabled: toBool(process.env.WHATSAPP_ENABLED, false),
